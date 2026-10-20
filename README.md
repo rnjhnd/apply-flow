@@ -2,9 +2,9 @@
 
 A calm, focused workspace for managing a job search. Milestone 1 and **Checkpoint 2A: PostgreSQL persistence foundation** are implemented and locally verified.
 
-**Checkpoint 2B stages 1–3** add tested authentication primitives, CSRF bootstrap, and bounded admission controls. `GET /api/v1/auth/csrf` is wired into the server; register, login, logout, and authenticated `/me` endpoints remain unimplemented. See the [stages 1–2 report](docs/milestones/checkpoint-2b-primitives-report.md) and [stage 3 verification report and security assumptions](docs/milestones/checkpoint-2b3-report.md).
+**Checkpoint 2B stages 1–4** add tested authentication primitives, CSRF bootstrap, bounded admission controls, and secure registration/login/logout/current-user API endpoints. See the [stages 1–2 report](docs/milestones/checkpoint-2b-primitives-report.md), [stage 3 report](docs/milestones/checkpoint-2b3-report.md), and [stage 4 verification report](docs/milestones/checkpoint-2b4-report.md). Frontend authentication screens remain unimplemented.
 
-The runnable preview contains a branded responsive page, an API connection check, a minimal Express server, shared validation contracts, unit tests, and CI. Checkpoint 2A adds isolated PostgreSQL services, guarded Prisma tooling, the approved User/Session migration, and persistence integration tests. The migration has been applied to the approved local development and test databases. Authentication, application tracking, background jobs, and deployment remain unimplemented.
+The runnable preview contains a branded responsive page, an API connection check, an Express authentication API, shared validation contracts, tests, and CI. Checkpoint 2A adds isolated PostgreSQL services, guarded Prisma tooling, the approved User/Session migration, and persistence integration tests. The migration has been applied to the approved local development and test databases. Application tracking, background jobs, and deployment remain unimplemented.
 
 ## Prerequisites
 
@@ -46,7 +46,7 @@ The API requires a guarded database URL supplied through the ignored `apps/api/.
 | `PORT` | `3000` | Integer string between 1 and 65535 |
 | `APP_TIMEZONE` | `Asia/Manila` | Timezone supported by the runtime |
 | `APP_ORIGIN` | `http://127.0.0.1:5173` locally | One exact canonical trusted origin; required HTTPS origin in production |
-| `ALLOW_LOCAL_REGISTRATION` | `false` | Production must remain false; no registration endpoint exists yet |
+| `ALLOW_LOCAL_REGISTRATION` | `false` | Enables registration only when explicitly true in development/test; forbidden in production |
 | `DATABASE_URL` | None | Approved development target locally; separate verified TLS configuration in production |
 | `TEST_DATABASE_URL` | None | Dedicated test target only when `NODE_ENV=test`; no fallback |
 
@@ -54,7 +54,7 @@ Environment values are validated before the server listens. If changing the API 
 
 **Application date policy for later milestones:** PostgreSQL `DATE` stores the application date without a time component. The API evaluates “today” in the explicit server-wide `APP_TIMEZONE`, defaulting to **Asia/Manila**, regardless of the host machine or browser timezone. Changing this setting intentionally changes that policy for all users of the instance. Dates later than that day will be rejected. Saved applications may have no application date; all other statuses require one. System event timestamps will use UTC. The foundation validates the timezone setting; it does not yet implement application date validation.
 
-**Authentication policy:** controlled local/test account creation will use email/password and PostgreSQL-backed sessions. Production public registration stays disabled until email verification, password recovery, and abuse protections exist. Only CSRF bootstrap is exposed so far; obtaining a token does not authenticate a user.
+**Authentication policy:** controlled local/test account creation uses email/password and PostgreSQL-backed sessions. Production public registration stays disabled until email verification, password recovery, and abuse protections exist. Obtaining a bootstrap token does not authenticate a user. Set `ALLOW_LOCAL_REGISTRATION=true` deliberately in local/test configuration and restart the API to enable account creation; defaults remain disabled.
 
 ### CSRF bootstrap and admission controls
 
@@ -62,13 +62,33 @@ Use the Vite proxy and relative `/api/v1/auth/csrf` URL, with `X-ApplyFlow-Reque
 
 The response is `{ "csrfToken": "<64 hexadecimal characters>" }`, with `Cache-Control: no-store`. A new anonymous session sets a host-only HttpOnly SameSite=Lax cookie, valid for exactly 15 minutes. Reuse returns the same token without a new cookie or activity refresh; an existing valid authenticated session can also retrieve its token without refreshing activity. Production configuration uses a Secure `__Host-` cookie. There is no CORS allowlist or preflight access.
 
-Supplied Origin must exactly match `APP_ORIGIN`; unsafe methods also require Origin. Supplied `Sec-Fetch-Site` must be `same-origin`. Legacy clients may omit Fetch Metadata; GET bootstrap may omit Origin because the required custom header plus browser same-origin policy prevents simple cross-origin bootstrap. GET bodies and query parameters are rejected, and bootstrap accepts only GET (HEAD/OPTIONS do not create sessions). JSON/content and strict credential-validation helpers are prepared for future write endpoints; they do not expose those endpoints.
+Supplied Origin must exactly match `APP_ORIGIN`; unsafe methods also require Origin. Supplied `Sec-Fetch-Site` must be `same-origin`. Legacy clients may omit Fetch Metadata; GET bootstrap may omit Origin because the required custom header plus browser same-origin policy prevents simple cross-origin bootstrap. GET bodies and query parameters are rejected, and bootstrap accepts only GET (HEAD/OPTIONS do not create sessions). Write endpoints require JSON and strict request contracts.
 
 Every auth-prefix request consumes a 120/IP/minute quota, including rejected traffic. New anonymous allocation also reserves 20/IP/15 minutes and 500/process/15 minutes, before database creation. Existing valid sessions skip allocation quotas. Store capacity is bounded and fails closed; reservations are not refunded after a database failure. Responses include request `RateLimit-*` headers and denials include `Retry-After`. Quotas use windows starting with a key's first request, not calendar-aligned intervals.
 
-Future login admission allows 30/IP/15 minutes and 5/normalized-email+IP/15 minutes; registration allows 5/IP/hour. These primitives are tested but are not wired to endpoints yet. Keys are per-process HMAC digests; raw emails and IPs are not stored in limiter keys. The direct socket address is authoritative (`trust proxy=false`); forwarded headers cannot reset quotas. IPv4-mapped addresses are canonicalized and native IPv6 addresses grouped by /56. A proxy or shared NAT may aggregate legitimate clients; deployment topology and limit tuning require later review. In-memory limits reset on restart and are not shared across processes.
+Login admission allows 30/IP/15 minutes and 5/normalized-email+IP/15 minutes; registration allows 5/IP/hour. These limits apply after request/session/CSRF validation and before password work. Failed credential attempts, duplicate registrations, and backend failures keep their reservations. Keys are per-process HMAC digests; raw emails and IPs are not stored in limiter keys. The direct socket address is authoritative (`trust proxy=false`); forwarded headers cannot reset quotas. IPv4-mapped addresses are canonicalized and native IPv6 addresses grouped by /56. A proxy or shared NAT may aggregate legitimate clients; deployment topology and limit tuning require later review. In-memory limits reset on restart and are not shared across processes.
 
 Runtime startup validates configuration and database identity before listening, and starts the existing bounded session cleanup task (100 expired sessions/minute, non-overlapping). Shutdown stops cleanup and disconnects Prisma. App factories used by tests start no background task. Health remains a liveness check rather than a database readiness probe. Production configuration support is not production deployment readiness.
+
+### Authentication API
+
+All paths below are under `/api/v1/auth`. Send `X-ApplyFlow-Request: 1` and retain the HttpOnly session cookie. POSTs require `Origin` matching `APP_ORIGIN`, `Content-Type: application/json`, and `X-CSRF-Token` from the current session. Tokens never belong in URLs. The frontend will use relative same-origin requests through Vite or the production server.
+
+| Endpoint | Request | Success | Session policy |
+| --- | --- | --- | --- |
+| `GET /csrf` | No body/query | 200 `{ csrfToken }` | Bootstrap/reuse anonymous or authenticated session |
+| `POST /register` | `{ email, password }` | 201 `{ user: { id, email }, csrfToken }` | Enabled local/test only; requires anonymous session and rotates it |
+| `POST /login` | `{ email, password }` | 200 `{ user: { id, email }, csrfToken }` | Requires anonymous session and rotates it |
+| `GET /me` | No body/query | 200 `{ user: { id, email } }` | Requires authenticated session; refreshes valid activity |
+| `POST /logout` | `{}` (or empty body with JSON media type) | 204, no response body | Revokes only the current authenticated session and clears its cookie |
+
+First retrieve `/csrf`, retain its cookie and CSRF token, then register or log in. After success, retain the replacement cookie and **new** CSRF token; the old anonymous session and token no longer authorize requests. Use the new token for logout. `/me` needs no CSRF token beyond the custom request header. Automatic HEAD fallback is disabled for `/me`; only GET refreshes activity. Already-authenticated login/register attempts return 409; logout before switching accounts. No account/session listing or logout-all endpoint is provided.
+
+Emails are trimmed/lowercased ASCII addresses, with dots and plus suffixes preserved. Password bytes/case/whitespace are preserved; registration requires 15–128 Unicode code points, and login accepts 1–128, using the previously approved Argon2id profile. Unknown accounts perform real dummy-hash verification and share the same 401 `INVALID_CREDENTIALS` message as incorrect passwords.
+
+Authenticated sessions enforce **24-hour idle** and **seven-day absolute** deadlines, inclusive at expiration. Each successful `/me` atomically updates last activity without extending the absolute expiry or reissuing the cookie. CSRF bootstrap and rejected requests do not refresh sessions. Logout and session replacement delete only the presented session. Session consumption is locked and revalidated inside the database transaction after password work; only one concurrent authentication request can use an anonymous session. Cookies are sent only after commit. Native password operations are limited to two concurrently in one runtime service; overload/backend failures return a sanitized 503 with no cookie.
+
+Missing/invalid/expired/revoked sessions return 401, invalid session-bound CSRF returns 403, and a session changed by a concurrent transaction can return 409 `SESSION_CHANGED`. Disabled registration returns 404. Duplicate local/test registration returns generic 409 `ACCOUNT_UNAVAILABLE`. Retrieve `/csrf` again when retrying after a session change. Error responses never set or clear cookies, so a losing concurrent response cannot erase a winning authentication cookie; successful logout clears it. Registration account creation and session rotation roll back together on failure. Commit cannot guarantee response delivery; a lost success response may require a fresh bootstrap and login.
 
 ## Workspace responsibilities
 
@@ -154,7 +174,7 @@ When returning to development in the same PowerShell terminal, clear the product
 
 ## Tests and CI
 
-Vitest tests contracts, configuration, database guards, password/session primitives, request validation, bounded admission, and CSRF HTTP handling with Supertest. Unit tests use injected dependencies and need no database. The separate PostgreSQL suite verifies persistence and real CSRF bootstrap, including rollback, expiry, concurrent allocation, committed cookie delivery, and fixture isolation. It fails closed outside the dedicated test target and cleans up only its own fixtures. Database-backed CI and React authentication screens belong to checkpoint 2C.
+Vitest tests contracts, configuration, database guards, password/session primitives, request validation, bounded admission, and auth/CSRF HTTP handling with Supertest. Unit tests use injected dependencies and need no database. The separate PostgreSQL suite verifies persistence, real Argon2-backed authentication, concurrent registration/session consumption, exact expiration boundaries, transaction rollback, committed cookie delivery, logout isolation, and fixture isolation. It fails closed outside the dedicated test target and cleans up only its own fixtures. Database-backed CI and React authentication screens belong to checkpoint 2C.
 
 GitHub Actions runs on pull requests and pushes to `main`, using `.nvmrc`, the root lockfile, read-only repository permissions, and pinned checkout/setup-node actions. It runs `npm ci`, lint, typecheck, unit tests, and the production build. Superseded branch runs are cancelled. It does not push or deploy.
 

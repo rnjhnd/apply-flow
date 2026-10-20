@@ -7,6 +7,8 @@ import { parseAuthConfig } from './config/auth.js';
 import { openRuntimeDatabase } from './db/client.js';
 import { createSessionService } from './modules/auth/sessions.js';
 import { startSessionCleanup } from './modules/auth/cleanup.js';
+import { createPasswordService } from './modules/auth/passwords.js';
+import { createAuthenticationService } from './modules/auth/authentication.js';
 
 async function main() {
   const envPath = fileURLToPath(new URL('../.env', import.meta.url));
@@ -16,7 +18,9 @@ async function main() {
   const database = await openRuntimeDatabase(process.env);
   try {
     const sessions = createSessionService(database.client);
-    const app = createApp(env, { config, sessions });
+    const passwords = await createPasswordService();
+    const authentication = createAuthenticationService(database.client, passwords);
+    const app = createApp(env, { config, sessions, authentication });
     const stopCleanup = startSessionCleanup(sessions);
     const server = app.listen(env.PORT, env.HOST, () => {
       console.info(`ApplyFlow API listening at http://${env.HOST}:${env.PORT}`);

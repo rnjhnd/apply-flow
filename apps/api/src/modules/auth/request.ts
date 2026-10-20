@@ -26,7 +26,7 @@ export const requireJsonRequest: RequestHandler = (request, _response, next) => 
   next();
 };
 
-// Validation primitive only: no register/login routes are mounted in this stage.
+// Store only strict, normalized credentials for the handlers that follow this middleware.
 export function validateCredentials(kind: 'login' | 'registration'): RequestHandler {
   return (request, response, next) => {
     const parsed = (kind === 'login' ? loginRequestSchema : registerRequestSchema).safeParse(request.body);

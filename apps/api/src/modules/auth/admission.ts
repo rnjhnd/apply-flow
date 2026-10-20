@@ -138,7 +138,7 @@ export function createAuthAdmission(options: { now?: Clock; maxKeys?: number } =
       consume([{ store: anonymousIp, key: keys.ip('anonymous', ip), limit: AUTH_LIMITS.anonymousIp },
         { store: anonymousGlobal, key: keys.global('anonymous-global'), limit: AUTH_LIMITS.anonymousGlobal }]);
     },
-    // Call only after origin, JSON, session and CSRF validation when stage 2B.4 adds credential endpoints.
+    // Credential routes call these only after origin, JSON, session and CSRF validation.
     admitLogin(ip: string, email: string) {
       const pair = keys.emailIp('login-pair', ip, email);
       consume([{ store: loginIp, key: keys.ip('login', ip), limit: AUTH_LIMITS.loginIp },

@@ -6,10 +6,12 @@ import { createSessionCookie, readSessionCookie } from './cookies.js';
 import { createAuthAdmission, clientAddress } from './admission.js';
 import { trustedAuthRequest } from './request.js';
 import { AuthHttpError } from './http-error.js';
+import type { AuthenticationService } from './authentication.js';
+import { createAuthenticationHttp } from './routes.js';
 
 export type BootstrapSessions = Pick<ReturnType<typeof createSessionService>, 'findValid' | 'createAnonymous'>;
 export type AuthHttpOptions = { config: AuthConfig; sessions: BootstrapSessions; now?: () => Date;
-  admission?: ReturnType<typeof createAuthAdmission> };
+  admission?: ReturnType<typeof createAuthAdmission>; authentication?: AuthenticationService };
 
 export function createAuthHttp(options: AuthHttpOptions) {
   const clock = options.now ?? (() => new Date());
@@ -44,5 +46,10 @@ export function createAuthHttp(options: AuthHttpOptions) {
     const body = csrfResponseSchema.parse({ csrfToken: created.session.csrfToken });
     response.set('Set-Cookie', cookie).json(body);
   });
-  return { admission: [noStore, admission.requestLimit, trustedAuthRequest(options.config)], router };
+  // Bootstrap-only composition remains useful for isolated tests; runtime always supplies the authentication service.
+  const authentication = options.authentication ? createAuthenticationHttp({ config: options.config, sessions: options.sessions,
+    authentication: options.authentication, admission, now: clock }) : undefined;
+  if (authentication) router.use(authentication.router);
+  return { admission: [noStore, admission.requestLimit, trustedAuthRequest(options.config),
+    ...(authentication ? [authentication.beforeJson] : [])], router };
 }
