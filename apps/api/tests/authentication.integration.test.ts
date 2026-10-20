@@ -87,6 +87,112 @@ beforeAll(async () => {
   passwordHash = await passwords.hash(password);
 });
 beforeEach(() => { time = Date.UTC(2026, 0, 1); });
+
+describe('final authentication security regressions', () => {
+  it.each([undefined, 'invalid', 'f'.repeat(64), 'matching'])('keeps anonymous logout at 401 with CSRF variant %s and does not mutate the session', async (variant) => {
+    const proof = await anonymous();
+    const spy = passwordSpy();
+    const app = makeApp({ passwords: spy });
+    const before = await rows();
+    const pending = request(app).post('/api/v1/auth/logout').set(headers(proof));
+    if (variant === undefined) pending.unset('X-CSRF-Token');
+    else if (variant !== 'matching') pending.set('X-CSRF-Token', variant);
+    const response = await pending.send({}).expect(401);
+    expect(response.body.code).toBe('UNAUTHENTICATED');
+    expect(response.headers['set-cookie']).toBeUndefined();
+    expect(await rows()).toEqual(before);
+    expect(spy.hash).not.toHaveBeenCalled(); expect(spy.verify).not.toHaveBeenCalled();
+  });
+  it.each(['invalid', 'f'.repeat(64)])('enforces anonymous logout 401 again inside the transactional service with CSRF %s', async (csrfToken) => {
+    const proof = await anonymous();
+    const before = await rows();
+    const authentication = createAuthenticationService(client(), passwords, { now: () => new Date(time) });
+    await expect(authentication.logout({ token: proof.token, csrfToken })).rejects.toMatchObject({ status: 401, code: 'UNAUTHENTICATED' });
+    expect(await rows()).toEqual(before);
+  });
+  it('returns 400 for malformed logout, preserves the current session, then returns bodyless 204 for valid logout', async () => {
+    const user = await seedUser();
+    const proof = await authenticated(user.id);
+    const app = makeApp();
+    const before = await rows();
+    for (const body of ['{', 'null', '[]', '{"allDevices":true}']) {
+      const response = await request(app).post('/api/v1/auth/logout').set(headers(proof)).set('Content-Type', 'application/json').send(body).expect(400);
+      expect(response.headers['set-cookie']).toBeUndefined();
+      expect(await rows()).toEqual(before);
+    }
+    const response = await request(app).post('/api/v1/auth/logout').set(headers(proof)).send({}).expect(204);
+    expect(response.text).toBe('');
+    expect(response.headers['content-type']).toBeUndefined();
+    expect(response.headers['set-cookie']?.[0]).toContain('Max-Age=0');
+    expect(await sessions().findValid(proof.token)).toBeNull();
+  });
+  it.each(['me', 'logout'] as const)('rejects %s if the idle deadline is reached between preflight and row-lock validation', async (kind) => {
+    const user = await seedUser();
+    const proof = await authenticated(user.id);
+    const before = await rows();
+    const database: AuthenticationDatabase = { user: client().user, $transaction: (work) => client().$transaction(async (transaction) => {
+      time += IDLE_LIFETIME_MS;
+      return work(transaction);
+    }) };
+    const app = makeApp({ database });
+    const pending = kind === 'me' ? request(app).get('/api/v1/auth/me') : request(app).post('/api/v1/auth/logout');
+    const response = await pending.set(headers(proof)).send(kind === 'me' ? undefined : {}).expect(401);
+    expect(response.headers['set-cookie']).toBeUndefined();
+    expect(await rows()).toEqual(before);
+  });
+  it('allows only one successful simultaneous logout and leaves another device intact', async () => {
+    const user = await seedUser();
+    const proof = await authenticated(user.id);
+    const other = await authenticated(user.id);
+    const app = makeApp();
+    const responses = await Promise.all(Array.from({ length: 2 }, () => request(app).post('/api/v1/auth/logout').set(headers(proof)).send({})));
+    expect(responses.filter((response) => response.status === 204)).toHaveLength(1);
+    const loser = responses.find((response) => response.status !== 204);
+    expect([401, 409]).toContain(loser?.status); // Missing at preflight, or consumed after successful preflight.
+    expect(loser?.headers['set-cookie']).toBeUndefined();
+    expect(await sessions().findValid(proof.token)).toBeNull();
+    expect(await sessions().findValid(other.token)).toEqual(other.session);
+  });
+  it('holds the verified password row against concurrent updates until login commits', async () => {
+    const user = await seedUser();
+    const proof = await anonymous();
+    let ready!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => { ready = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const database: AuthenticationDatabase = { user: client().user, $transaction: (work) => client().$transaction(async (transaction) => {
+      const result = await work(transaction);
+      ready();
+      await gate;
+      return result;
+    }) };
+    const pending = request(makeApp({ database })).post('/api/v1/auth/login').set(headers(proof)).send({ email: email(), password }).then((response) => response);
+    try {
+      await Promise.race([reached, pending.then(() => { throw new Error('Login ended before reaching the commit gate.'); })]);
+      // Transaction-local timeout proves the conflicting UPDATE is blocked, without changing persistent settings.
+      await expect(client().$transaction(async (transaction) => {
+        await transaction.$executeRaw`SET LOCAL lock_timeout = '200ms'`;
+        await transaction.$executeRaw`UPDATE public."User" SET "passwordHash" = 'this-fixture-must-not-be-written' WHERE id = ${user.id}::uuid`;
+      })).rejects.toThrow(/lock timeout/);
+      expect((await client().user.findUniqueOrThrow({ where: { id: user.id } })).passwordHash).toBe(passwordHash);
+    } finally { release(); await pending; }
+    expect((await pending).status).toBe(200);
+    expect((await client().user.findUniqueOrThrow({ where: { id: user.id } })).passwordHash).toBe(passwordHash);
+  });
+  it('does not log or return secret-bearing errors from the authenticated session preflight', async () => {
+    const user = await seedUser();
+    const proof = await authenticated(user.id);
+    const app = makeApp();
+    const before = await rows();
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(client().session, 'findUnique').mockRejectedValueOnce(new Error(`${email()} password=private session=${proof.token} hash=${passwordHash}`));
+    const response = await request(app).get('/api/v1/auth/me').set(headers(proof)).expect(503);
+    expect(response.body).toEqual({ code: 'SERVICE_UNAVAILABLE', message: 'Authentication is temporarily unavailable.' });
+    expect(response.headers['set-cookie']).toBeUndefined();
+    expect(log).not.toHaveBeenCalled();
+    expect(await rows()).toEqual(before);
+  });
+});
 afterEach(async () => {
   vi.restoreAllMocks();
   await client().$transaction(async (transaction) => {

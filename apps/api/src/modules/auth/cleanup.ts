@@ -1,6 +1,6 @@
 type Cleanup = { cleanupExpired: (limit?: number) => Promise<number> };
 
-// Opt-in only: the current foundation HTTP server does not start this task.
+// Started explicitly by the runtime server; creating an app never starts this task.
 export function startSessionCleanup(service: Cleanup, reportFailure = () => console.error('Expired session cleanup failed.')) {
   let running: Promise<void> | undefined;
   let stopped = false;

@@ -211,6 +211,31 @@ describe('session primitives on isolated PostgreSQL', () => {
     })).rejects.toBe(failure);
     expect(await client().session.findUnique({ where: { id: sessionId } })).toBeNull();
   });
+  it('cleans another expired session while skipping a valid in-flight refresh and preserving a second active device', async () => {
+    const protectedSession = await remember(service().createAuthenticated(userId));
+    const expired = await remember(service().createAuthenticated(userId));
+    const otherDevice = await remember(service(client(), anchor + IDLE_LIFETIME_MS / 2).createAuthenticated(userId));
+    let release!: () => void;
+    let locked!: () => void;
+    const ready = new Promise<void>((resolve) => { locked = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const refresh = client().$transaction(async (transaction) => {
+      expect(await service(transaction, anchor + IDLE_LIFETIME_MS - 1).refreshAuthenticated(protectedSession.token)).not.toBeNull();
+      locked();
+      await gate;
+    });
+    try {
+      await Promise.race([ready, refresh]);
+      time = anchor + IDLE_LIFETIME_MS + 1;
+      expect(await service().cleanupExpired(1)).toBe(1);
+      expect(await client().session.findUnique({ where: { id: expired.session.id } })).toBeNull();
+      expect(await client().session.findUnique({ where: { id: protectedSession.session.id } })).not.toBeNull();
+      expect(await service().findValid(otherDevice.token)).toEqual(otherDevice.session);
+    } finally { release(); await refresh; }
+    expect(await service().cleanupExpired()).toBe(0);
+    expect(await service().findValid(protectedSession.token)).not.toBeNull();
+    expect(await service().findValid(otherDevice.token)).toEqual(otherDevice.session);
+  });
   it('rejects invalid entropy and owners without leaving partial session state', async () => {
     await expect(createSessionService(client(), { token: () => 'a'.repeat(64) }).createAnonymous()).rejects.toThrow(/entropy/);
     await expect(createSessionService(client(), { now: () => new Date(NaN) }).createAnonymous()).rejects.toThrow(/clock/);

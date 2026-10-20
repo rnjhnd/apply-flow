@@ -49,15 +49,16 @@ export function createAuthenticationHttp(options: Options) {
   }
   async function proof(request: Request, kind: 'anonymous' | 'authenticated'): Promise<SessionProof> {
     const { token, existing } = await session(request);
+    // Logout's contract is 401 for anonymous sessions, independent of CSRF header presence.
+    if (kind === 'authenticated' && existing.userId === null) {
+      throw new AuthHttpError(401, 'UNAUTHENTICATED', 'A valid authenticated session is required.');
+    }
     const supplied = request.get('X-CSRF-Token');
     if (!matchesCsrfToken(existing.csrfToken, supplied)) {
       throw new AuthHttpError(403, 'REQUEST_REJECTED', 'Authentication request rejected.');
     }
     if (kind === 'anonymous' && existing.userId !== null) {
       throw new AuthHttpError(409, 'ALREADY_AUTHENTICATED', 'Log out before authenticating another session.');
-    }
-    if (kind === 'authenticated' && existing.userId === null) {
-      throw new AuthHttpError(401, 'UNAUTHENTICATED', 'A valid authenticated session is required.');
     }
     // matchesCsrfToken has already checked format and type.
     return { token, csrfToken: supplied! };

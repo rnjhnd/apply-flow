@@ -35,13 +35,13 @@ export function createAuthenticationService(database: AuthenticationDatabase, pa
     const session = rows[0];
     if (!session) throw new AuthHttpError(409, 'SESSION_CHANGED', 'The session changed. Retrieve a new CSRF token and retry.');
     if (!isSessionValid(session, clock())) throw unauthenticated();
+    if (kind === 'authenticated' && session.userId === null) throw unauthenticated();
     if (csrf && !matchesCsrfToken(session.csrfToken, proof.csrfToken)) {
       throw new AuthHttpError(403, 'REQUEST_REJECTED', 'Authentication request rejected.');
     }
     if (kind === 'anonymous' && session.userId !== null) {
       throw new AuthHttpError(409, 'ALREADY_AUTHENTICATED', 'Log out before authenticating another session.');
     }
-    if (kind === 'authenticated' && session.userId === null) throw unauthenticated();
     return session;
   }
   async function replace(transaction: Prisma.TransactionClient, previous: Session, user: { id: string; email: string }) {

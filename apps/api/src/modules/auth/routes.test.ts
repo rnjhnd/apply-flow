@@ -8,6 +8,7 @@ import type { Session } from '../../generated/prisma/client.ts';
 import type { AuthenticationService } from './authentication.js';
 import type { BootstrapSessions } from './csrf.js';
 import { ABSOLUTE_LIFETIME_MS } from './sessions.js';
+import { createAuthAdmission } from './admission.js';
 
 const token = 'a'.repeat(64);
 const csrf = 'b'.repeat(64);
@@ -34,6 +35,60 @@ function fixture(options: { authenticated?: boolean; enabled?: boolean; producti
   return { app, authentication, sessions, config, headers };
 }
 describe('secure authentication HTTP composition', () => {
+  it.each([undefined, 'invalid', 'f'.repeat(64), csrf])('returns 401 for anonymous logout regardless of CSRF header %s', async (supplied) => {
+    const { app, headers, authentication } = fixture();
+    const pending = request(app).post('/api/v1/auth/logout').set(headers);
+    if (supplied === undefined) pending.unset('X-CSRF-Token');
+    else pending.set('X-CSRF-Token', supplied);
+    const response = await pending.send({}).expect(401);
+    expect(response.body.code).toBe('UNAUTHENTICATED');
+    expect(response.headers['set-cookie']).toBeUndefined();
+    expect(authentication.logout).not.toHaveBeenCalled();
+  });
+  it.each(['{', 'null', '[]', '{"allDevices":true}'])('returns 400 for malformed logout before authentication: %s', async (body) => {
+    const { app, sessions, authentication } = fixture();
+    const response = await request(app).post('/api/v1/auth/logout').set('X-ApplyFlow-Request', '1').set('Origin', origin)
+      .set('Content-Type', 'application/json').send(body).expect(400);
+    expect(response.headers['set-cookie']).toBeUndefined();
+    expect(sessions.findValid).not.toHaveBeenCalled();
+    expect(authentication.logout).not.toHaveBeenCalled();
+  });
+  it.each(['csrf', 'me', 'register', 'login', 'logout'])('enforces request admission on %s in the full API composition', async (endpoint) => {
+    const { app, headers, sessions, authentication } = fixture({ authenticated: endpoint === 'me' || endpoint === 'logout' });
+    const pending = () => ['csrf', 'me'].includes(endpoint) ? request(app).get(`/api/v1/auth/${endpoint}`) : request(app).post(`/api/v1/auth/${endpoint}`);
+    const body = endpoint === 'logout' ? {} : credentials;
+    for (const rejected of [{ Origin: 'null' }, { Origin: 'https://evil.invalid' }, { 'Sec-Fetch-Site': 'same-site' }, { 'X-ApplyFlow-Request': '' }]) {
+      const response = await pending().set(headers).set(rejected).send(['csrf', 'me'].includes(endpoint) ? undefined : body).expect(403);
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(response.headers['set-cookie']).toBeUndefined();
+    }
+    expect(sessions.findValid).not.toHaveBeenCalled();
+    for (const work of Object.values(authentication)) expect(work).not.toHaveBeenCalled();
+  });
+  it.each(['Origin', 'X-ApplyFlow-Request', 'X-CSRF-Token'])('rejects duplicate %s wire headers without authentication work', async (name) => {
+    const { app, headers, authentication } = fixture({ authenticated: true });
+    const value = name === 'Origin' ? origin : name === 'X-CSRF-Token' ? csrf : '1';
+    const response = await request(app).post('/api/v1/auth/logout').set(headers).set({ [name]: [value, value] }).send({}).expect(403);
+    expect(response.headers['set-cookie']).toBeUndefined();
+    expect(authentication.logout).not.toHaveBeenCalled();
+  });
+  it('ignores an insecure cookie name in production mode instead of treating it as authenticated', async () => {
+    const { app, headers, sessions, authentication } = fixture({ production: true, authenticated: true });
+    await request(app).get('/api/v1/auth/me').set(headers).set('Cookie', `applyflow_session=${token}`).expect(401);
+    expect(sessions.findValid).not.toHaveBeenCalled();
+    expect(authentication.me).not.toHaveBeenCalled();
+  });
+  it('allows valid-session bootstrap and health while the global allocation budget is exhausted', async () => {
+    const { sessions, config, authentication, headers } = fixture();
+    const admission = createAuthAdmission({ now: () => new Date(0) });
+    for (let ip = 1; ip <= 25; ip++) for (let count = 0; count < 20; count++) admission.reserveAnonymous(`10.0.0.${ip}`);
+    const app = createApp(parseEnv({ NODE_ENV: 'test' }), { sessions, config, authentication, admission });
+    const reused = await request(app).get('/api/v1/auth/csrf').set(headers).expect(200, { csrfToken: csrf });
+    expect(reused.headers['set-cookie']).toBeUndefined();
+    await request(app).get('/api/v1/auth/csrf').set('X-ApplyFlow-Request', '1').expect(429);
+    await request(app).get('/api/v1/health/live').expect(200);
+    expect(sessions.createAnonymous).not.toHaveBeenCalled();
+  });
   it('normalizes registration, returns only the authenticated contract, and sets a seven-day local cookie', async () => {
     const { app, headers, authentication } = fixture();
     const response = await request(app).post('/api/v1/auth/register').set(headers).send({ ...credentials, email: ' PERSON@Example.invalid ' }).expect(201);
