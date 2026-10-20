@@ -1,11 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { parseAuthConfig } from './auth.js';
+import { isRegistrationEnabled, parseAuthConfig } from './auth.js';
 import { readProductionDatabaseTarget } from './production-database.js';
 import { openRuntimeDatabase } from '../db/client.js';
 
 const productionUrl = 'postgresql://runtime:fixture-password@database.example.invalid:5432/applyflow';
 
 describe('authentication configuration', () => {
+  it('shares the explicit local/test policy and fails closed even for a misconstructed production config', () => {
+    for (const nodeEnv of ['development', 'test', 'production'] as const) {
+      for (const allowLocalRegistration of [false, true]) {
+        expect(isRegistrationEnabled({ nodeEnv, allowLocalRegistration, appOrigin: 'https://app.example.com' }))
+          .toBe(nodeEnv !== 'production' && allowLocalRegistration);
+      }
+    }
+  });
   it('uses explicit local registration and a single local origin', () => {
     expect(parseAuthConfig({})).toEqual({ nodeEnv: 'development', appOrigin: 'http://127.0.0.1:5173', allowLocalRegistration: false });
     expect(parseAuthConfig({ NODE_ENV: 'test', ALLOW_LOCAL_REGISTRATION: 'true' }).allowLocalRegistration).toBe(true);

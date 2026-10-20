@@ -31,10 +31,10 @@ function fixture(mode: 'test' | 'production' = 'test') {
 }
 
 describe('CSRF bootstrap HTTP admission without a database', () => {
-  it('returns only the token with no-store, secure local cookie policy, and request quota headers', async () => {
+  it('returns only the token and display capability with no-store, cookie policy, and quota headers', async () => {
     const { app, sessions } = fixture();
     const response = await request(app).get(path).set(headers).expect(200);
-    expect(response.body).toEqual({ csrfToken });
+    expect(response.body).toEqual({ csrfToken, registrationEnabled: false });
     expect(response.headers['cache-control']).toBe('no-store');
     expect(response.headers['ratelimit-remaining']).toBe('119');
     expect(response.headers['set-cookie']).toEqual([expect.stringContaining(`applyflow_session=${token}; Max-Age=900`)]);
@@ -43,6 +43,22 @@ describe('CSRF bootstrap HTTP admission without a database', () => {
     expect(sessions.findValid).not.toHaveBeenCalled();
     expect(sessions.createAnonymous).toHaveBeenCalledOnce();
   });
+  it.each(['development', 'test', 'production'] as const)(
+    'derives capability for both new and reused sessions in %s; production always denies', async (nodeEnv) => {
+      for (const enabled of [false, true]) {
+        const { sessions, session } = fixture();
+        const config = { nodeEnv, appOrigin: nodeEnv === 'production' ? 'https://applyflow.example' : origin,
+          allowLocalRegistration: enabled };
+        const app = createApp(parseEnv({ NODE_ENV: 'test' }), { config, sessions, now: () => session.createdAt });
+        for (const reused of [false, true]) {
+          const pending = request(app).get(path).set(headers);
+          if (reused) pending.set('Cookie', nodeEnv === 'production' ? `__Host-applyflow_session=${token}` : cookie);
+          const response = await pending.expect(200);
+          expect(response.body).toEqual({ csrfToken, registrationEnabled: nodeEnv !== 'production' && enabled });
+          expect(Boolean(response.headers['set-cookie'])).toBe(!reused);
+        }
+      }
+    });
   it('uses the __Host secure cookie policy in production configuration without a production connection', async () => {
     const response = await request(fixture('production').app).get(path).set(headers).expect(200);
     expect(response.headers['set-cookie']?.[0]).toContain(`__Host-applyflow_session=${token}`);

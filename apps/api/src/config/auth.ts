@@ -25,3 +25,8 @@ export function parseAuthConfig(source: Record<string, string | undefined>) {
 }
 
 export type AuthConfig = ReturnType<typeof parseAuthConfig>;
+
+// Display capability and HTTP authorization share policy, never client-supplied state.
+export function isRegistrationEnabled(config: AuthConfig): boolean {
+  return (config.nodeEnv === 'development' || config.nodeEnv === 'test') && config.allowLocalRegistration;
+}

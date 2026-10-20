@@ -21,7 +21,7 @@ export const loginRequestSchema = z.strictObject({ email: normalizedEmailSchema,
 export const logoutRequestSchema = z.preprocess((value) => value === undefined ? {} : value, z.strictObject({}));
 export const csrfTokenSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export const authUserSchema = z.strictObject({ id: z.uuid(), email: normalizedEmailSchema });
-export const csrfResponseSchema = z.strictObject({ csrfToken: csrfTokenSchema });
+export const csrfResponseSchema = z.strictObject({ csrfToken: csrfTokenSchema, registrationEnabled: z.boolean() });
 export const authenticatedResponseSchema = z.strictObject({ user: authUserSchema, csrfToken: csrfTokenSchema });
 export const meResponseSchema = z.strictObject({ user: authUserSchema });
 export const authErrorResponseSchema = z.strictObject({

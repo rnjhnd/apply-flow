@@ -1,6 +1,6 @@
 import { Router, type Request, type RequestHandler } from 'express';
 import { logoutRequestSchema, type LoginRequest, type RegisterRequest } from '@applyflow/contracts';
-import type { AuthConfig } from '../../config/auth.js';
+import { isRegistrationEnabled, type AuthConfig } from '../../config/auth.js';
 import type { BootstrapSessions } from './csrf.js';
 import type { AuthenticationService, SessionProof } from './authentication.js';
 import type { createAuthAdmission } from './admission.js';
@@ -18,7 +18,7 @@ export function createAuthenticationHttp(options: Options) {
   const beforeJson = Router();
   const router = Router();
   const registrationEnabled: RequestHandler = (_request, _response, next) => {
-    if (config.nodeEnv === 'production' || !config.allowLocalRegistration) {
+    if (!isRegistrationEnabled(config)) {
       return next(new AuthHttpError(404, 'NOT_FOUND', 'The requested resource was not found.'));
     }
     next();

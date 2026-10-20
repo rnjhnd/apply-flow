@@ -83,7 +83,7 @@ describe('secure authentication HTTP composition', () => {
     const admission = createAuthAdmission({ now: () => new Date(0) });
     for (let ip = 1; ip <= 25; ip++) for (let count = 0; count < 20; count++) admission.reserveAnonymous(`10.0.0.${ip}`);
     const app = createApp(parseEnv({ NODE_ENV: 'test' }), { sessions, config, authentication, admission });
-    const reused = await request(app).get('/api/v1/auth/csrf').set(headers).expect(200, { csrfToken: csrf });
+    const reused = await request(app).get('/api/v1/auth/csrf').set(headers).expect(200, { csrfToken: csrf, registrationEnabled: true });
     expect(reused.headers['set-cookie']).toBeUndefined();
     await request(app).get('/api/v1/auth/csrf').set('X-ApplyFlow-Request', '1').expect(429);
     await request(app).get('/api/v1/health/live').expect(200);
@@ -113,6 +113,7 @@ describe('secure authentication HTTP composition', () => {
     const { app, headers, config, sessions, authentication } = fixture({ production, enabled: false });
     if (production) config.allowLocalRegistration = true; // Defense in depth even if a caller bypassed the production parser.
     await request(app).post('/api/v1/auth/register').set(headers).set('Content-Type', 'application/json').send('{').expect(404);
+    await request(app).post('/api/v1/auth/register').set(headers).send({ ...credentials, registrationEnabled: true }).expect(404);
     expect(sessions.findValid).not.toHaveBeenCalled();
     expect(authentication.register).not.toHaveBeenCalled();
   });

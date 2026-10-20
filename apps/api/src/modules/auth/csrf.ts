@@ -1,6 +1,6 @@
 import { Router, type RequestHandler } from 'express';
 import { csrfResponseSchema } from '@applyflow/contracts';
-import type { AuthConfig } from '../../config/auth.js';
+import { isRegistrationEnabled, type AuthConfig } from '../../config/auth.js';
 import type { createSessionService } from './sessions.js';
 import { createSessionCookie, readSessionCookie } from './cookies.js';
 import { createAuthAdmission, clientAddress } from './admission.js';
@@ -34,7 +34,7 @@ export function createAuthHttp(options: AuthHttpOptions) {
     try { existing = token ? await options.sessions.findValid(token) : null; }
     catch { throw new AuthHttpError(503, 'SERVICE_UNAVAILABLE', 'Authentication storage is unavailable.', 1); }
     if (existing) {
-      response.json(csrfResponseSchema.parse({ csrfToken: existing.csrfToken }));
+      response.json(csrfResponseSchema.parse({ csrfToken: existing.csrfToken, registrationEnabled: isRegistrationEnabled(options.config) }));
       return;
     }
     admission.reserveAnonymous(clientAddress(request));
@@ -43,7 +43,7 @@ export function createAuthHttp(options: AuthHttpOptions) {
     catch { throw new AuthHttpError(503, 'SERVICE_UNAVAILABLE', 'Authentication storage is unavailable.', 1); }
     // The runtime service uses a standalone guarded client: create resolves after commit.
     const cookie = createSessionCookie(options.config.nodeEnv, created.token, created.session.expiresAt, clock());
-    const body = csrfResponseSchema.parse({ csrfToken: created.session.csrfToken });
+    const body = csrfResponseSchema.parse({ csrfToken: created.session.csrfToken, registrationEnabled: isRegistrationEnabled(options.config) });
     response.set('Set-Cookie', cookie).json(body);
   });
   // Bootstrap-only composition remains useful for isolated tests; runtime always supplies the authentication service.

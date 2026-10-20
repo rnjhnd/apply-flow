@@ -3,6 +3,14 @@ import { authenticatedResponseSchema, authErrorResponseSchema, csrfResponseSchem
   logoutRequestSchema, normalizedEmailSchema, registerRequestSchema, registrationPasswordSchema } from './auth.js';
 
 describe('authentication contracts', () => {
+  it.each([true, false])('requires an explicit boolean registration capability: %s', (registrationEnabled) => {
+    const value = { csrfToken: 'a'.repeat(64), registrationEnabled };
+    expect(csrfResponseSchema.parse(value)).toEqual(value);
+    expect(csrfResponseSchema.safeParse({ ...value, token: 'secret' }).success).toBe(false);
+  });
+  it.each([undefined, null, 'true', 1])('rejects missing or coerced registration capability: %s', (registrationEnabled) => {
+    expect(csrfResponseSchema.safeParse({ csrfToken: 'a'.repeat(64), registrationEnabled }).success).toBe(false);
+  });
   it('normalizes email consistently and preserves password bytes', () => {
     expect(registerRequestSchema.parse({ email: '  Student+Jobs@Example.COM ', password: '  A long password  ' }))
       .toEqual({ email: 'student+jobs@example.com', password: '  A long password  ' });
@@ -33,7 +41,7 @@ describe('authentication contracts', () => {
     expect(authenticatedResponseSchema.parse(response)).toEqual(response);
     expect(authenticatedResponseSchema.safeParse({ ...response, token: 'secret' }).success).toBe(false);
     expect(authenticatedResponseSchema.safeParse({ ...response, user: { ...response.user, passwordHash: 'secret' } }).success).toBe(false);
-    expect(csrfResponseSchema.safeParse({ csrfToken: 'a'.repeat(63) }).success).toBe(false);
+    expect(csrfResponseSchema.safeParse({ csrfToken: 'a'.repeat(63), registrationEnabled: false }).success).toBe(false);
     expect(authErrorResponseSchema.safeParse({ code: 'INVALID_REQUEST', message: 'Invalid fields.', fieldErrors: { password: ['Too short'] } }).success).toBe(true);
     expect(authErrorResponseSchema.safeParse({ code: 'INVALID_REQUEST', message: 'Invalid fields.', password: 'secret' }).success).toBe(false);
   });

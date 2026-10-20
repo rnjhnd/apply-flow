@@ -26,9 +26,9 @@ function client() {
   return connection.client;
 }
 function primitives() { return createSessionService(client(), { now: () => new Date(time) }); }
-function bootstrap(sessions?: BootstrapSessions, maxKeys?: number) {
+function bootstrap(sessions?: BootstrapSessions, maxKeys?: number, allowLocalRegistration = false) {
   const service = primitives();
-  return createApp(parseEnv({ NODE_ENV: 'test' }), { config: parseAuthConfig({ NODE_ENV: 'test' }), now: () => new Date(time),
+  return createApp(parseEnv({ NODE_ENV: 'test' }), { config: parseAuthConfig({ NODE_ENV: 'test', ALLOW_LOCAL_REGISTRATION: String(allowLocalRegistration) }), now: () => new Date(time),
     admission: createAuthAdmission({ now: () => new Date(time), ...(maxKeys === undefined ? {} : { maxKeys }) }),
     sessions: sessions ?? { findValid: service.findValid, async createAnonymous() {
       const result = await service.createAnonymous();
@@ -72,6 +72,15 @@ afterEach(async () => {
 afterAll(async () => { await connection?.client.$disconnect(); });
 
 describe('CSRF bootstrap on the isolated PostgreSQL test database', () => {
+  it.each([false, true])('reports server registration capability %s on allocated and reused sessions', async (enabled) => {
+    const app = bootstrap(undefined, undefined, enabled);
+    const first = await request(app).get(path).set(headers).expect(200);
+    expect(first.body).toEqual({ csrfToken: expect.stringMatching(/^[a-f0-9]{64}$/), registrationEnabled: enabled });
+    const before = await client().session.findMany({ where: { id: { in: [...ownedSessions] } } });
+    const reused = await request(app).get(path).set(headers).set('Cookie', sessionCookie(first)).expect(200);
+    expect(reused.body).toEqual(first.body); expect(reused.headers['set-cookie']).toBeUndefined();
+    expect(await client().session.findMany({ where: { id: { in: [...ownedSessions] } } })).toEqual(before);
+  });
   it('validates the actual connected test identity and rejects development runtime selection', async () => {
     expect(connection?.target).toMatchObject({ name: 'test', host: '127.0.0.1', port: '5433', database: 'applyflow_test', username: 'applyflow_test' });
     await expect(openLocalDatabase('development', process.env)).rejects.toThrow();
@@ -126,7 +135,7 @@ describe('CSRF bootstrap on the isolated PostgreSQL test database', () => {
     ownedSessions.add(existing.session.id);
     time += IDLE_LIFETIME_MS - 1;
     const response = await request(bootstrap()).get(path).set(headers).set('Cookie', `applyflow_session=${existing.token}`).expect(200);
-    expect(response.body).toEqual({ csrfToken: existing.session.csrfToken });
+    expect(response.body).toEqual({ csrfToken: existing.session.csrfToken, registrationEnabled: false });
     expect(response.headers['set-cookie']).toBeUndefined();
     expect(await client().session.findUniqueOrThrow({ where: { id: existing.session.id } })).toEqual(existing.session);
     expect(await ownedCount()).toBe(1);
