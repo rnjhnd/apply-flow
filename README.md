@@ -2,7 +2,7 @@
 
 A calm, focused workspace for managing a job search. Milestone 1 and **Checkpoint 2A: PostgreSQL persistence foundation** are implemented and locally verified.
 
-**Checkpoint 2B stages 1–2** add tested authentication contracts, configuration, Argon2id password helpers, and session/cookie primitives. Authentication HTTP endpoints are not implemented or wired into the server yet. See the [stages 1–2 verification report and security assumptions](docs/milestones/checkpoint-2b-primitives-report.md).
+**Checkpoint 2B stages 1–3** add tested authentication primitives, CSRF bootstrap, and bounded admission controls. `GET /api/v1/auth/csrf` is wired into the server; register, login, logout, and authenticated `/me` endpoints remain unimplemented. See the [stages 1–2 report](docs/milestones/checkpoint-2b-primitives-report.md) and [stage 3 verification report and security assumptions](docs/milestones/checkpoint-2b3-report.md).
 
 The runnable preview contains a branded responsive page, an API connection check, a minimal Express server, shared validation contracts, unit tests, and CI. Checkpoint 2A adds isolated PostgreSQL services, guarded Prisma tooling, the approved User/Session migration, and persistence integration tests. The migration has been applied to the approved local development and test databases. Authentication, application tracking, background jobs, and deployment remain unimplemented.
 
@@ -10,7 +10,7 @@ The runnable preview contains a branded responsive page, an API connection check
 
 - **Node.js 24.22.0 LTS**, pinned in `.nvmrc`. With an existing Node version manager, install/select the version in that file; on Windows with nvm-windows, use `nvm install 24.22.0` followed by `nvm use 24.22.0`.
 - **npm 11.19.1**, the version used to generate the single root lockfile. Use npm 11; no Yarn or pnpm lockfiles.
-- Git. The current frontend/API preview does not require a database. Checkpoint 2A database commands require a running Docker Desktop installation with Linux containers and the `docker compose` plugin.
+- Git and Docker Desktop with Linux containers and the `docker compose` plugin. The API now requires the configured, already-migrated PostgreSQL development database at startup. Unit tests and builds do not require PostgreSQL.
 
 The root engine check rejects Node versions outside major 24. TypeScript 6.0.3 is selected because it is supported by the installed TypeScript ESLint release. Dependency versions are pinned and reproducible through `package-lock.json`.
 
@@ -25,6 +25,8 @@ npm ci
 npm run dev
 ```
 
+Before running the API for the first time, follow the [Checkpoint 2A database setup](docs/milestones/checkpoint-2a-setup.md). Create the ignored environment file with `npm run db:env:init` only if it does not already exist, and start the development service with `npm run db:up`. Migration application always requires explicit SQL approval; startup and tests never apply migrations automatically.
+
 On Windows PowerShell, use `npm.cmd` in place of `npm` if execution policy blocks `npm.ps1`. Changing the machine's execution policy is unnecessary.
 
 Open **http://127.0.0.1:5173**. Vite proxies `/api` to **http://127.0.0.1:3000**, so the browser uses relative, same-origin requests. The initial check and **Check connection** button call `GET /api/v1/health/live`, validate the response, and display success or a retryable failure. Checks time out after eight seconds.
@@ -33,9 +35,9 @@ Open **http://127.0.0.1:5173**. Vite proxies `/api` to **http://127.0.0.1:3000**
 
 For separate terminals, first run `npm run build -w @applyflow/contracts`, then use `npm run dev:api` and `npm run dev:web`. Run `npm run dev -w @applyflow/contracts` separately if editing shared contracts.
 
-### Optional API environment
+### API environment
 
-Defaults work without an `.env` file. To customize them, copy `apps/api/.env.example` to `apps/api/.env`. Node loads this file in development and production; existing process variables take precedence. Never commit real environment files.
+The API requires a guarded database URL supplied through the ignored `apps/api/.env` or process environment. Prefer `npm run db:env:init` for local database credentials rather than the placeholders in the example. Extend an existing environment file deliberately; never overwrite it or commit real credentials. Node loads this file in development and production; existing process variables take precedence.
 
 | Variable | Default | Policy |
 | --- | --- | --- |
@@ -43,12 +45,30 @@ Defaults work without an `.env` file. To customize them, copy `apps/api/.env.exa
 | `HOST` | `127.0.0.1` | Nonempty bind host; use `0.0.0.0` only when deliberately exposing the server |
 | `PORT` | `3000` | Integer string between 1 and 65535 |
 | `APP_TIMEZONE` | `Asia/Manila` | Timezone supported by the runtime |
+| `APP_ORIGIN` | `http://127.0.0.1:5173` locally | One exact canonical trusted origin; required HTTPS origin in production |
+| `ALLOW_LOCAL_REGISTRATION` | `false` | Production must remain false; no registration endpoint exists yet |
+| `DATABASE_URL` | None | Approved development target locally; separate verified TLS configuration in production |
+| `TEST_DATABASE_URL` | None | Dedicated test target only when `NODE_ENV=test`; no fallback |
 
 Environment values are validated before the server listens. If changing the API port, update Vite's proxy target in `apps/web/vite.config.ts` to match. Restart the API after editing `.env`.
 
 **Application date policy for later milestones:** PostgreSQL `DATE` stores the application date without a time component. The API evaluates “today” in the explicit server-wide `APP_TIMEZONE`, defaulting to **Asia/Manila**, regardless of the host machine or browser timezone. Changing this setting intentionally changes that policy for all users of the instance. Dates later than that day will be rejected. Saved applications may have no application date; all other statuses require one. System event timestamps will use UTC. The foundation validates the timezone setting; it does not yet implement application date validation.
 
-**Authentication policy for later milestones:** controlled local/test account creation will use email/password and PostgreSQL-backed sessions. Production public registration stays disabled until email verification, password recovery, and abuse protections exist. No registration or authentication endpoints exist in this milestone.
+**Authentication policy:** controlled local/test account creation will use email/password and PostgreSQL-backed sessions. Production public registration stays disabled until email verification, password recovery, and abuse protections exist. Only CSRF bootstrap is exposed so far; obtaining a token does not authenticate a user.
+
+### CSRF bootstrap and admission controls
+
+Use the Vite proxy and relative `/api/v1/auth/csrf` URL, with `X-ApplyFlow-Request: 1`. For a local manual check, `curl.exe -i -H "X-ApplyFlow-Request: 1" http://127.0.0.1:5173/api/v1/auth/csrf` creates a development session; use this deliberately because it writes a row. Do not put credentials or tokens in URLs. A frontend authentication flow will be added separately.
+
+The response is `{ "csrfToken": "<64 hexadecimal characters>" }`, with `Cache-Control: no-store`. A new anonymous session sets a host-only HttpOnly SameSite=Lax cookie, valid for exactly 15 minutes. Reuse returns the same token without a new cookie or activity refresh; an existing valid authenticated session can also retrieve its token without refreshing activity. Production configuration uses a Secure `__Host-` cookie. There is no CORS allowlist or preflight access.
+
+Supplied Origin must exactly match `APP_ORIGIN`; unsafe methods also require Origin. Supplied `Sec-Fetch-Site` must be `same-origin`. Legacy clients may omit Fetch Metadata; GET bootstrap may omit Origin because the required custom header plus browser same-origin policy prevents simple cross-origin bootstrap. GET bodies and query parameters are rejected, and bootstrap accepts only GET (HEAD/OPTIONS do not create sessions). JSON/content and strict credential-validation helpers are prepared for future write endpoints; they do not expose those endpoints.
+
+Every auth-prefix request consumes a 120/IP/minute quota, including rejected traffic. New anonymous allocation also reserves 20/IP/15 minutes and 500/process/15 minutes, before database creation. Existing valid sessions skip allocation quotas. Store capacity is bounded and fails closed; reservations are not refunded after a database failure. Responses include request `RateLimit-*` headers and denials include `Retry-After`. Quotas use windows starting with a key's first request, not calendar-aligned intervals.
+
+Future login admission allows 30/IP/15 minutes and 5/normalized-email+IP/15 minutes; registration allows 5/IP/hour. These primitives are tested but are not wired to endpoints yet. Keys are per-process HMAC digests; raw emails and IPs are not stored in limiter keys. The direct socket address is authoritative (`trust proxy=false`); forwarded headers cannot reset quotas. IPv4-mapped addresses are canonicalized and native IPv6 addresses grouped by /56. A proxy or shared NAT may aggregate legitimate clients; deployment topology and limit tuning require later review. In-memory limits reset on restart and are not shared across processes.
+
+Runtime startup validates configuration and database identity before listening, and starts the existing bounded session cleanup task (100 expired sessions/minute, non-overlapping). Shutdown stops cleanup and disconnects Prisma. App factories used by tests start no background task. Health remains a liveness check rather than a database readiness probe. Production configuration support is not production deployment readiness.
 
 ## Workspace responsibilities
 
@@ -97,7 +117,7 @@ npm test
 npm run build
 ```
 
-Start the compiled server under the production environment. PowerShell:
+Production-mode startup also requires an explicit HTTPS `APP_ORIGIN`, production database identity, and certificate-verified database TLS as validated by the existing runtime configuration parser. Local Docker credentials do not satisfy that configuration. This stage does not provision production infrastructure or validate deployment readiness. With separately supplied runtime configuration, start the compiled server under the production environment. PowerShell:
 
 ```powershell
 $env:NODE_ENV = 'production'
@@ -134,7 +154,7 @@ When returning to development in the same PowerShell terminal, clear the product
 
 ## Tests and CI
 
-Vitest tests the real environment parser, database target guards, and health response schema, including invalid values, boundary ports, forbidden connection overrides, unexpected fields, and configuration defaults. The separate persistence suite verifies the physical PostgreSQL schema, Prisma UUID generation, committed reads, rollback, uniqueness, and foreign-key behavior. It fails closed outside the dedicated test target and cleans up only its own fixtures. API authentication integration tests with Supertest belong to checkpoint 2B; database-backed CI and React authentication screens belong to checkpoint 2C.
+Vitest tests contracts, configuration, database guards, password/session primitives, request validation, bounded admission, and CSRF HTTP handling with Supertest. Unit tests use injected dependencies and need no database. The separate PostgreSQL suite verifies persistence and real CSRF bootstrap, including rollback, expiry, concurrent allocation, committed cookie delivery, and fixture isolation. It fails closed outside the dedicated test target and cleans up only its own fixtures. Database-backed CI and React authentication screens belong to checkpoint 2C.
 
 GitHub Actions runs on pull requests and pushes to `main`, using `.nvmrc`, the root lockfile, read-only repository permissions, and pinned checkout/setup-node actions. It runs `npm ci`, lint, typecheck, unit tests, and the production build. Superseded branch runs are cancelled. It does not push or deploy.
 

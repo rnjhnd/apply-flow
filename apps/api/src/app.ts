@@ -5,12 +5,18 @@ import express, { type ErrorRequestHandler } from 'express';
 import helmet from 'helmet';
 import { healthResponseSchema } from '@applyflow/contracts';
 import type { Env } from './config/env.js';
+import { createAuthHttp, type AuthHttpOptions } from './modules/auth/csrf.js';
+import { AuthHttpError } from './modules/auth/http-error.js';
 
-export function createApp(env: Env) {
+export function createApp(env: Env, authentication: AuthHttpOptions) {
   const app = express();
   app.disable('x-powered-by');
+  app.set('trust proxy', false);
   app.use(helmet());
+  const auth = createAuthHttp(authentication);
+  app.use('/api/v1/auth', ...auth.admission);
   app.use(express.json({ limit: '16kb' }));
+  app.use('/api/v1/auth', auth.router);
 
   app.get('/api/v1/health/live', (_req, res) => {
     res.set('Cache-Control', 'no-store').json(healthResponseSchema.parse({
@@ -46,6 +52,12 @@ export function createApp(env: Env) {
   app.use(notFound);
   const errorHandler: ErrorRequestHandler = (error: unknown, _req, res, next) => {
     if (res.headersSent) return next(error);
+    if (error instanceof AuthHttpError) {
+      if (error.retryAfter !== undefined) res.set('Retry-After', String(error.retryAfter));
+      res.status(error.status).json({ code: error.code, message: error.message,
+        ...(error.fieldErrors === undefined ? {} : { fieldErrors: error.fieldErrors }) });
+      return;
+    }
     const type = typeof error === 'object' && error !== null && 'type' in error ? error.type : undefined;
     if (type === 'entity.parse.failed') {
       res.status(400).json({ code: 'INVALID_JSON', message: 'Request body must be valid JSON.' });
