@@ -2,6 +2,8 @@
 
 A calm, focused workspace for managing a job search. Milestone 1 and **Checkpoint 2A: PostgreSQL persistence foundation** are implemented and locally verified.
 
+**Checkpoint 2B stages 1–2** add tested authentication contracts, configuration, Argon2id password helpers, and session/cookie primitives. Authentication HTTP endpoints are not implemented or wired into the server yet. See the [stages 1–2 verification report and security assumptions](docs/milestones/checkpoint-2b-primitives-report.md).
+
 The runnable preview contains a branded responsive page, an API connection check, a minimal Express server, shared validation contracts, unit tests, and CI. Checkpoint 2A adds isolated PostgreSQL services, guarded Prisma tooling, the approved User/Session migration, and persistence integration tests. The migration has been applied to the approved local development and test databases. Authentication, application tracking, background jobs, and deployment remain unimplemented.
 
 ## Prerequisites
@@ -68,13 +70,16 @@ This is a modular monolith with npm workspaces. Feature modules will be added as
 | `npm run dev:api` | Run only the API through `tsx watch` |
 | `npm run lint` | Read-only ESLint check; warnings fail |
 | `npm run typecheck` | Generate Prisma and contract declarations, then check workspaces and tooling configurations |
-| `npm test` | Run foundation unit tests once; discovering no tests fails |
+| `npm test` | Run unit tests once; discovering no tests fails |
 | `npm run test:integration` | Run guarded PostgreSQL persistence tests against the dedicated, already-migrated test database |
 | `npm run test:watch` | Interactive Vitest watch mode |
+| `npm run bench:passwords` | Measure the approved Argon2id profile locally without a database or account creation |
 | `npm run build` | Build contracts, generate Prisma, compile the API, and bundle the frontend |
 | `npm start` | Run the compiled API; set `NODE_ENV=production` to serve the built frontend |
 
-Contracts use an incremental watcher to avoid unnecessary startup emissions; explicit builds force fresh output. Generated files, build caches, dependencies, local environment files, and test artifacts are ignored. npm allows only the pinned esbuild, Prisma CLI version-check, and Prisma engine-download scripts recorded in the root package's `allowScripts` policy.
+Contracts use an incremental watcher to avoid unnecessary startup emissions; explicit builds force fresh output. Generated files, build caches, dependencies, local environment files, and test artifacts are ignored. npm allows only the pinned esbuild, Prisma CLI version-check, Prisma engine-download, and reviewed Argon2 native installation scripts recorded in the root package's `allowScripts` policy.
+
+The Argon2 approval is restricted to version 0.45.1. Test commands prepare shared contract output and the ignored Prisma client before running; neither preparation step connects to a database or applies migrations. Unit tests remain independent of a running PostgreSQL service.
 
 ### PostgreSQL / Prisma persistence foundation
 

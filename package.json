@@ -18,9 +18,10 @@
     "dev:api": "npm run db:generate && npm run dev -w @applyflow/api",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "npm run build -w @applyflow/contracts && npm run typecheck --workspaces && tsc --noEmit -p tsconfig.json",
-    "test": "vitest run",
-    "test:integration": "npm run db:generate && vitest run --config vitest.integration.config.ts",
-    "test:watch": "vitest",
+    "test": "npm run build -w @applyflow/contracts && npm run db:generate && vitest run",
+    "test:integration": "npm run build -w @applyflow/contracts && npm run db:generate && vitest run --config vitest.integration.config.ts",
+    "test:watch": "npm run build -w @applyflow/contracts && npm run db:generate && vitest",
+    "bench:passwords": "npm run build -w @applyflow/contracts && npm run bench:passwords -w @applyflow/api",
     "build": "npm run build -w @applyflow/contracts && npm run build -w @applyflow/api && npm run build -w @applyflow/web",
     "start": "npm run start -w @applyflow/api",
     "db:env:init": "npm run db:env:init -w @applyflow/api",
@@ -51,6 +52,7 @@
   "allowScripts": {
     "esbuild@0.28.2": true,
     "prisma@7.10.1": true,
-    "@prisma/engines@7.10.1": true
+    "@prisma/engines@7.10.1": true,
+    "argon2@0.45.1": true
   }
 }
