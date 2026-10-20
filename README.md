@@ -1,14 +1,14 @@
 # ApplyFlow
 
-A calm, focused workspace for managing a job search. This repository currently implements **Milestone 1: Foundation** only.
+A calm, focused workspace for managing a job search. Milestone 1 and **Checkpoint 2A: PostgreSQL persistence foundation** are implemented and locally verified.
 
-The runnable preview contains a branded responsive page, an API connection check, a minimal Express server, shared validation contracts, unit tests, and CI. Authentication, application tracking, database persistence, background jobs, and deployment are not implemented.
+The runnable preview contains a branded responsive page, an API connection check, a minimal Express server, shared validation contracts, unit tests, and CI. Checkpoint 2A adds isolated PostgreSQL services, guarded Prisma tooling, the approved User/Session migration, and persistence integration tests. The migration has been applied to the approved local development and test databases. Authentication, application tracking, background jobs, and deployment remain unimplemented.
 
 ## Prerequisites
 
 - **Node.js 24.22.0 LTS**, pinned in `.nvmrc`. With an existing Node version manager, install/select the version in that file; on Windows with nvm-windows, use `nvm install 24.22.0` followed by `nvm use 24.22.0`.
 - **npm 11.19.1**, the version used to generate the single root lockfile. Use npm 11; no Yarn or pnpm lockfiles.
-- Git. No database, Docker, credentials, or external service is needed for this milestone.
+- Git. The current frontend/API preview does not require a database. Checkpoint 2A database commands require a running Docker Desktop installation with Linux containers and the `docker compose` plugin.
 
 The root engine check rejects Node versions outside major 24. TypeScript 6.0.3 is selected because it is supported by the installed TypeScript ESLint release. Dependency versions are pinned and reproducible through `package-lock.json`.
 
@@ -67,13 +67,20 @@ This is a modular monolith with npm workspaces. Feature modules will be added as
 | `npm run dev:web` | Run only Vite on port 5173 |
 | `npm run dev:api` | Run only the API through `tsx watch` |
 | `npm run lint` | Read-only ESLint check; warnings fail |
-| `npm run typecheck` | Build contract declarations, then check all workspaces and the Vitest configuration |
+| `npm run typecheck` | Generate Prisma and contract declarations, then check workspaces and tooling configurations |
 | `npm test` | Run foundation unit tests once; discovering no tests fails |
+| `npm run test:integration` | Run guarded PostgreSQL persistence tests against the dedicated, already-migrated test database |
 | `npm run test:watch` | Interactive Vitest watch mode |
-| `npm run build` | Build contracts, compile the API, and bundle the frontend |
+| `npm run build` | Build contracts, generate Prisma, compile the API, and bundle the frontend |
 | `npm start` | Run the compiled API; set `NODE_ENV=production` to serve the built frontend |
 
-Contracts use an incremental watcher to avoid unnecessary startup emissions; explicit builds force fresh output. Generated files, build caches, dependencies, local environment files, and test artifacts are ignored. npm allows only the pinned esbuild installation script recorded in the root package's `allowScripts` policy.
+Contracts use an incremental watcher to avoid unnecessary startup emissions; explicit builds force fresh output. Generated files, build caches, dependencies, local environment files, and test artifacts are ignored. npm allows only the pinned esbuild, Prisma CLI version-check, and Prisma engine-download scripts recorded in the root package's `allowScripts` policy.
+
+### PostgreSQL / Prisma persistence foundation
+
+See [Checkpoint 2A setup and SQL approval](docs/milestones/checkpoint-2a-setup.md) for database commands, target restrictions, and the mandatory SQL approval gate. Prisma CLI, client, and PostgreSQL adapter are pinned to **7.10.1**. Client generation and the existing build/check commands remain offline and do not run migrations.
+
+The initial SQL was explicitly approved and applied to the isolated local databases. New targets still require target validation and explicit SQL approval before migration. Persistence tests never apply migrations or reset databases. Docker tooling may need execution outside the agent sandbox; no Docker, WSL, or machine PATH changes are required. See the [Checkpoint 2A completion report](docs/milestones/checkpoint-2a-report.md) for executed checks and scope limitations.
 
 ## Production build and local verification
 
@@ -122,7 +129,7 @@ When returning to development in the same PowerShell terminal, clear the product
 
 ## Tests and CI
 
-Vitest tests the real environment parser and health response schema, including invalid values, boundary ports, unexpected fields, and configuration defaults. API integration tests with PostgreSQL and Supertest, frontend interaction tests, and Playwright workflows will be added when those features become functional.
+Vitest tests the real environment parser, database target guards, and health response schema, including invalid values, boundary ports, forbidden connection overrides, unexpected fields, and configuration defaults. The separate persistence suite verifies the physical PostgreSQL schema, Prisma UUID generation, committed reads, rollback, uniqueness, and foreign-key behavior. It fails closed outside the dedicated test target and cleans up only its own fixtures. API authentication integration tests with Supertest belong to checkpoint 2B; database-backed CI and React authentication screens belong to checkpoint 2C.
 
 GitHub Actions runs on pull requests and pushes to `main`, using `.nvmrc`, the root lockfile, read-only repository permissions, and pinned checkout/setup-node actions. It runs `npm ci`, lint, typecheck, unit tests, and the production build. Superseded branch runs are cancelled. It does not push or deploy.
 
@@ -143,4 +150,4 @@ The palette and font choices follow `DESIGN_SYSTEM.md`. Text/button color pairs 
 - [PRD.md](PRD.md): product scope and future milestones.
 - [DESIGN_SYSTEM.md](DESIGN_SYSTEM.md): visual direction and accessibility requirements.
 
-No commits, pushes, deployments, database migrations, authentication, or later-milestone features are part of this foundation implementation.
+The initial database migration was explicitly approved and applied locally. No migrations, authentication, later-checkpoint features, commits, pushes, or deployments are performed automatically by this setup.

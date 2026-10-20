@@ -15,13 +15,25 @@
   "scripts": {
     "dev": "npm run build -w @applyflow/contracts && concurrently --raw --kill-others --names contracts,api,web \"npm run dev -w @applyflow/contracts\" \"npm run dev:api\" \"npm run dev:web\"",
     "dev:web": "npm run dev -w @applyflow/web",
-    "dev:api": "npm run dev -w @applyflow/api",
+    "dev:api": "npm run db:generate && npm run dev -w @applyflow/api",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "npm run build -w @applyflow/contracts && npm run typecheck --workspaces && tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
+    "test:integration": "npm run db:generate && vitest run --config vitest.integration.config.ts",
     "test:watch": "vitest",
     "build": "npm run build -w @applyflow/contracts && npm run build -w @applyflow/api && npm run build -w @applyflow/web",
-    "start": "npm run start -w @applyflow/api"
+    "start": "npm run start -w @applyflow/api",
+    "db:env:init": "npm run db:env:init -w @applyflow/api",
+    "db:compose:validate": "npm run db:compose:validate -w @applyflow/api",
+    "db:up": "npm run db:up -w @applyflow/api",
+    "db:test:up": "npm run db:test:up -w @applyflow/api",
+    "db:stop": "npm run db:stop -w @applyflow/api",
+    "db:generate": "npm run db:generate -w @applyflow/api",
+    "db:validate": "npm run db:validate -w @applyflow/api",
+    "db:verify": "npm run db:verify -w @applyflow/api",
+    "db:migrate:create": "npm run db:migrate:create -w @applyflow/api --",
+    "db:migrate:deploy": "npm run db:migrate:deploy -w @applyflow/api --",
+    "db:migrate:test": "npm run db:migrate:test -w @applyflow/api --"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
@@ -37,6 +49,8 @@
     "vitest": "5.0.5"
   },
   "allowScripts": {
-    "esbuild@0.28.2": true
+    "esbuild@0.28.2": true,
+    "prisma@7.10.1": true,
+    "@prisma/engines@7.10.1": true
   }
 }

@@ -4,7 +4,8 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "types": ["node"],
+    "rewriteRelativeImportExtensions": true,
     "noEmit": true
   },
-  "include": ["vitest.config.ts"]
+  "include": ["vitest.config.ts", "vitest.integration.config.ts", "apps/api/prisma.config.ts", "apps/api/scripts/**/*.ts", "apps/api/tests/**/*.ts"]
 }

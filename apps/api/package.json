@@ -5,18 +5,32 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch --include ../../packages/contracts/dist/*.js src/server.ts",
-    "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/server.js"
+    "typecheck": "npm run db:generate && tsc --noEmit",
+    "build": "npm run db:generate && tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "db:env:init": "tsx scripts/db.ts env:init",
+    "db:compose:validate": "tsx scripts/db.ts compose:validate",
+    "db:up": "tsx scripts/db.ts up",
+    "db:test:up": "tsx scripts/db.ts test:up",
+    "db:stop": "tsx scripts/db.ts stop",
+    "db:generate": "tsx scripts/db.ts generate",
+    "db:validate": "tsx scripts/db.ts validate",
+    "db:verify": "tsx scripts/db.ts verify",
+    "db:migrate:create": "tsx scripts/db.ts migrate:create",
+    "db:migrate:deploy": "tsx scripts/db.ts migrate:deploy",
+    "db:migrate:test": "tsx scripts/db.ts migrate:test"
   },
   "dependencies": {
     "@applyflow/contracts": "0.0.0",
+    "@prisma/adapter-pg": "7.10.1",
+    "@prisma/client": "7.10.1",
     "express": "5.3.0",
     "helmet": "8.3.0",
     "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/express": "5.0.6",
+    "prisma": "7.10.1",
     "tsx": "4.23.15"
   }
 }
