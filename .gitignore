@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+coverage/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Test artifacts
+playwright-report/
+test-results/
+
+# Editor / system
+.DS_Store
+Thumbs.db
+.vscode/*.local.json
+
+# Temporary files
+tmp/
+temp/
