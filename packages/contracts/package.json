@@ -1,0 +1,20 @@
+{
+  "name": "@applyflow/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "dev": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --build tsconfig.build.json --force"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  }
+}

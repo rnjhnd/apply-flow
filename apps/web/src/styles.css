@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f8f7f4;
+  --surface: #ffffff;
+  --foreground: #202824;
+  --primary: #235b4e;
+  --primary-hover: #19483d;
+  --primary-foreground: #ffffff;
+  --accent: #d58b55;
+  --muted: #efeee9;
+  --muted-foreground: #59635d;
+  --border: #e4e6e1;
+  --input: #89968d;
+  --ring: #235b4e;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --font-heading: 'Manrope Variable', sans-serif;
+  --font-sans: 'Inter Variable', sans-serif;
+}
+
+@layer base {
+  body { margin: 0; background: var(--background); color: var(--foreground); font-family: var(--font-sans); }
+  ::selection { background: #dce9e2; color: var(--foreground); }
+  a:focus-visible { outline: 2px solid var(--ring); outline-offset: 4px; }
+}
+
+.skip-link {
+  position: fixed;
+  top: 1rem;
+  left: 1rem;
+  z-index: 10;
+  transform: translateY(-200%);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.skip-link:focus { transform: translateY(0); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
