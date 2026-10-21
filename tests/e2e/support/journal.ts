@@ -2,13 +2,14 @@ import { mkdirSync, openSync, writeSync, fsyncSync, closeSync, readFileSync } fr
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { parseJournal, type Owner, type OwnershipEvent, type OwnershipJournal } from './ownership.js';
+import { canonicalOwner, parseJournal, type Owner, type OwnershipEvent, type OwnershipJournal } from './ownership.js';
+import { digest } from './schema.js';
 
 export type JournalIo = { read(): string; append(line: string, exclusive: boolean): void };
 
 // Fixed repository-local path. No caller-supplied directory or secret filename.
 export function fileJournalIo(owner: Owner): JournalIo {
-  z.uuid().parse(owner.runId); z.uuid().parse(owner.testId);
+  owner = canonicalOwner(owner);
   const directory = fileURLToPath(new URL(`../../../.cache/e2e/${owner.runId}/`, import.meta.url));
   const file = join(directory, `${owner.testId}.jsonl`);
   return {
@@ -35,6 +36,11 @@ const lineSchema = z.strictObject({ sequence: z.number().int().nonnegative(), jo
 // Append-only snapshots allow truncated/partial writes to fail closed. Do not
 // silently salvage or automatically clean an interrupted run.
 export function readJournal(io: JournalIo, owner: Owner): OwnershipJournal {
+  return readJournalSnapshot(io, owner).journal;
+}
+
+export function readJournalSnapshot(io: JournalIo, owner: Owner) {
+  owner = canonicalOwner(owner);
   try {
     const contents = io.read();
     if (!contents.endsWith('\n') || contents.length > 32 * 1024 * 1024) throw new Error('Incomplete journal.');
@@ -55,13 +61,15 @@ export function readJournal(io: JournalIo, owner: Owner): OwnershipJournal {
       previous = current;
     }
     if (!previous) throw new Error('Missing journal.');
-    return previous;
+    return { journal: previous, sequence: lines.length - 1, digest: digest(contents) };
   } catch { throw new Error('Missing, malformed, or ambiguous ownership journal; manual review required.'); }
 }
 
 export function createJournal(io: JournalIo, owner: Owner) {
-  let journal = parseJournal({ version: 1, ...owner, state: 'running', events: [] }, owner);
+  owner = canonicalOwner(owner);
+  let journal = parseJournal({ version: 1, runId: owner.runId, testId: owner.testId, state: 'running', events: [] }, owner);
   let sequence = 0;
+  let sealed = false;
   io.append(`${JSON.stringify({ sequence, journal })}\n`, true);
   function append(next: OwnershipJournal) {
     // Detect competing writers or reuse rather than overwriting their state.
@@ -73,14 +81,21 @@ export function createJournal(io: JournalIo, owner: Owner) {
   }
   return {
     record(event: OwnershipEvent): void {
-      if (journal.state !== 'running') throw new Error('Fixture ownership is closed.');
+      if (sealed || journal.state !== 'running') throw new Error('Fixture ownership is closed.');
       append({ ...journal, events: [...journal.events, event] });
     },
     // Future lifecycle adapter may call ONLY after observing child exit. Merely
     // sending shutdown/kill or losing IPC is insufficient evidence.
     markExited(): void {
-      if (journal.state !== 'running') throw new Error('Fixture ownership is already closed.');
+      if (sealed || journal.state !== 'running') throw new Error('Fixture ownership is already closed.');
       append({ ...journal, state: 'stopped' });
+    },
+    // Sealing closes this writer without pretending the child can observe its
+    // own exit. Only the parent finalizer may append resolved user ownership.
+    sealForHandoff() {
+      if (sealed || journal.state !== 'running') throw new Error('Fixture ownership is closed.');
+      sealed = true;
+      return readJournalSnapshot(io, owner);
     }
   };
 }

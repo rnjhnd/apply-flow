@@ -15,14 +15,24 @@ const journalSchema = z.strictObject({ version: z.literal(1), runId: id, testId:
   state: z.enum(['running', 'stopped']), events: z.array(eventSchema).max(10_000) });
 export type OwnershipJournal = z.infer<typeof journalSchema>;
 export type Owner = Pick<OwnershipJournal, 'runId' | 'testId'>;
+const ownerSchema = z.object({ runId: id, testId: id });
+
+// Owner/context inputs may contain unrelated application state. Drop every
+// non-allowlisted field without reading/serializing it; reject malformed IDs.
+export function canonicalOwner(input: Owner): Readonly<Owner> {
+  const result = ownerSchema.safeParse(input);
+  if (!result.success) throw new Error('Invalid fixture owner.');
+  return Object.freeze({ runId: result.data.runId, testId: result.data.testId });
+}
 
 export function ownedEmail(owner: Owner, suffix: string): string {
-  id.parse(owner.runId); id.parse(owner.testId);
+  owner = canonicalOwner(owner);
   if (!/^[a-f0-9-]{1,36}$/.test(suffix)) throw new Error('Invalid fixture suffix.');
   return `e2e-${owner.runId}-${owner.testId}-${suffix}@example.invalid`;
 }
 
 export function parseJournal(input: unknown, owner: Owner): OwnershipJournal {
+  owner = canonicalOwner(owner);
   const result = journalSchema.safeParse(input);
   if (!result.success) throw new Error('Missing or malformed ownership journal.');
   const journal = result.data;

@@ -58,6 +58,16 @@ afterEach(() => {
   vi.unstubAllGlobals(); vi.unstubAllEnvs();
 });
 describe('offline Playwright configuration/discovery', () => {
+  it('imports every B1 adapter without constructing database, socket, HTTP, or process dependencies', async () => {
+    vi.stubEnv('NODE_ENV', 'production'); vi.stubEnv('TEST_DATABASE_URL', undefined);
+    await Promise.all([
+      import('./schema.js'), import('./catalog.js'), import('./guarded-database.js'),
+      import('./safety-io.js'), import('./journal.js'), import('./finalization.js'),
+      import('./cleanup.js'), import('./child-protocol.js'), import('./composition.js'), import('./execution.js'),
+      import('./intent-client.js'), import('./child-runtime.js'), import('./evidence-files.js')
+    ]);
+    expect(unavailable).not.toHaveBeenCalled();
+  });
   it('imports without environment admission, network, databases, or application processes', async () => {
     vi.stubEnv('NODE_ENV', 'production'); vi.stubEnv('TEST_DATABASE_URL', undefined);
     vi.stubEnv('PLAYWRIGHT_BROWSERS_PATH', undefined);
