@@ -24,6 +24,7 @@
     "test:e2e": "node --import tsx tests/e2e/support/run.ts",
     "test:e2e:list": "playwright test --config playwright.config.ts --list",
     "test:e2e:offline": "vitest run --project unit tests/e2e/support",
+    "test:e2e:preflight": "node --import tsx tests/e2e/support/read-only-preflight.ts",
     "bench:passwords": "npm run build -w @applyflow/contracts && npm run bench:passwords -w @applyflow/api",
     "build": "npm run build -w @applyflow/contracts && npm run build -w @applyflow/api && npm run build -w @applyflow/web",
     "start": "npm run start -w @applyflow/api",

@@ -64,9 +64,20 @@ describe('offline Playwright configuration/discovery', () => {
       import('./schema.js'), import('./catalog.js'), import('./guarded-database.js'),
       import('./safety-io.js'), import('./journal.js'), import('./finalization.js'),
       import('./cleanup.js'), import('./child-protocol.js'), import('./composition.js'), import('./execution.js'),
-      import('./intent-client.js'), import('./child-runtime.js'), import('./evidence-files.js')
+      import('./intent-client.js'), import('./child-runtime.js'), import('./evidence-files.js'),
+      import('./read-only-database.js'), import('./read-only-preflight.js')
     ]);
     expect(unavailable).not.toHaveBeenCalled();
+  });
+  it('B2 Gate A command cannot construct pg/socket dependencies even with explicit test credentials', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    vi.stubEnv('TEST_DATABASE_URL', 'postgresql://applyflow_test:offline-sentinel@127.0.0.1:5433/applyflow_test');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { runPreflightCommand } = await import('./read-only-preflight.js');
+      expect(await runPreflightCommand()).toBe(1); expect(unavailable).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledExactlyOnceWith('Read-only preflight disabled: Gate B approval and review are required.');
+    } finally { log.mockRestore(); }
   });
   it('imports without environment admission, network, databases, or application processes', async () => {
     vi.stubEnv('NODE_ENV', 'production'); vi.stubEnv('TEST_DATABASE_URL', undefined);

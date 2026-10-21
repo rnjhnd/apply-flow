@@ -1,6 +1,7 @@
 import { Prisma } from '../../../apps/api/src/generated/prisma/client.ts';
 import type { DatabaseInspection } from './guarded-database.js';
 import { z } from 'zod';
+import { validateHistory, validateSchema } from './schema.js';
 
 const endpointSchema = z.object({ host: z.literal('127.0.0.1'), port: z.literal(5433) });
 const identitySchema = z.strictObject({ database: z.string().min(1), username: z.string().min(1) });
@@ -42,4 +43,39 @@ export async function inspectCatalog(tx: Pick<Prisma.TransactionClient, '$queryR
   return { identity, history,
     schema: { tables: tables.map((row) => row.name), columns, indexes,
       constraints: constraints.map((row) => row.value), triggers: triggers.map((row) => row.value), rowSecurity: rowSecurity.map((row) => row.value) } };
+}
+
+// B2 has its own fixed query vocabulary. B1's locking history read stays intact.
+export const readOnlyCatalogSql = Object.freeze({
+  ...catalogSql,
+  history: Prisma.sql`SELECT migration_name, checksum, finished_at, rolled_back_at, applied_steps_count, logs FROM public._prisma_migrations ORDER BY migration_name`,
+  relations: Prisma.sql`SELECT c.relname AS name, c.relkind::text AS kind, c.relpersistence::text AS persistence FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname IN ('User', 'Session', '_prisma_migrations') ORDER BY c.relname`
+});
+export type ReadOnlyCatalogKey = keyof typeof readOnlyCatalogSql;
+
+export async function inspectReadOnlyCatalog(read: (key: ReadOnlyCatalogKey) => Promise<unknown>,
+  endpoint: { host: string; port: number }): Promise<DatabaseInspection> {
+  const peer = endpointSchema.parse(endpoint);
+  const identities = z.array(identitySchema).length(1).parse(await read('identity'));
+  const identity = identities[0]!;
+  const relations = z.array(z.strictObject({ name: z.string(), kind: z.literal('r'), persistence: z.literal('p') }))
+    .length(3).parse(await read('relations'));
+  if (JSON.stringify(relations.map((row) => row.name).sort()) !== JSON.stringify(['Session', 'User', '_prisma_migrations'])) {
+    throw new Error('Unexpected relation metadata.');
+  }
+  // Check ordinary permanent relations before touching migration-table contents.
+  const history = await read('history');
+  validateHistory(history);
+  const names = z.array(z.strictObject({ name: z.string() }));
+  const values = z.array(z.strictObject({ value: z.string() }));
+  const schema = {
+    tables: names.parse(await read('tables')).map((row) => row.name),
+    columns: await read('columns'), indexes: await read('indexes'),
+    constraints: values.parse(await read('constraints')).map((row) => row.value),
+    triggers: values.parse(await read('triggers')).map((row) => row.value),
+    rowSecurity: values.parse(await read('rowSecurity')).map((row) => row.value)
+  };
+  validateSchema(schema);
+  return { identity: Object.freeze({ database: identity.database, username: identity.username,
+    host: peer.host, port: peer.port }), history, schema };
 }
