@@ -3,6 +3,8 @@ import tls from 'node:tls';
 import http from 'node:http';
 import https from 'node:https';
 import childProcess from 'node:child_process';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import pg from 'pg';
 import { PrismaClient } from '../../../apps/api/src/generated/prisma/client.ts';
@@ -65,7 +67,10 @@ describe('offline Playwright configuration/discovery', () => {
       import('./safety-io.js'), import('./journal.js'), import('./finalization.js'),
       import('./cleanup.js'), import('./child-protocol.js'), import('./composition.js'), import('./execution.js'),
       import('./intent-client.js'), import('./child-runtime.js'), import('./evidence-files.js'),
-      import('./read-only-database.js'), import('./read-only-preflight.js')
+      import('./read-only-database.js'), import('./read-only-preflight.js'),
+      import('./fixture-database.js'), import('./fixture-evidence.js'), import('./fixture-files.js'), import('./fixture-services.js'),
+      import('./fixture-process.js'), import('./fixture-child.js'), import('./fixture-lifecycle.js'),
+      import('./fixture-preflight.js'), import('./fixture-cycle.js')
     ]);
     expect(unavailable).not.toHaveBeenCalled();
   });
@@ -87,6 +92,61 @@ describe('offline Playwright configuration/discovery', () => {
     expect(isPreflightEntrypoint(process.argv[1])).toBe(false);
     expect(unavailable).not.toHaveBeenCalled();
   });
+  it('B3 commands remain disabled with valid environment and arbitrary approval/argument flags', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    vi.stubEnv('TEST_DATABASE_URL', 'postgresql://applyflow_test:offline-sentinel@127.0.0.1:5433/applyflow_test');
+    vi.stubEnv('APPLYFLOW_FIXTURES_APPROVED', 'true');
+    const { runFixtureInspection } = await import('./fixture-preflight.js');
+    const { runFixtureCycle } = await import('./fixture-cycle.js');
+    const output = vi.fn();
+    expect(Reflect.apply(runFixtureInspection, undefined, [output, '--approve', '--sql=DELETE'])).toBe(1);
+    expect(Reflect.apply(runFixtureCycle, undefined, [output, '--approve', '--base-url=http://other'])).toBe(1);
+    expect(runFixtureInspection(() => { throw new Error('private reporter sentinel'); })).toBe(1);
+    expect(runFixtureCycle(() => { throw new Error('private reporter sentinel'); })).toBe(1);
+    expect(output.mock.calls.every(([line]) => String(line).startsWith('APPLYFLOW_FIXTURES DISABLED:'))).toBe(true);
+    expect(unavailable).not.toHaveBeenCalled();
+  });
+  it.each(['inspect-only', 'fixture-cycle'] as const)('blocks alternate installed %s composition before any constructor', async (mode) => {
+    vi.stubEnv('NODE_ENV', 'test'); vi.stubEnv('APPLYFLOW_FIXTURES_APPROVED', 'true');
+    const { installedFixtureDriver, openFixtureDatabase } = await import('./fixture-database.js');
+    const { requireLivePhase } = await import('./execution.js');
+    const { env, sql } = await import('./b1-fakes.js');
+    expect(() => requireLivePhase('fixtures')).toThrow('disabled');
+    const review = vi.fn();
+    await expect(installedFixtureDriver(mode).then((driver) => openFixtureDatabase(env, sql, mode, driver, review)))
+      .rejects.toThrow(mode === 'inspect-only' ? 'B3C1' : 'B3C2');
+    await expect(Reflect.apply(installedFixtureDriver, undefined, [mode, { approved: true }, '--approve']))
+      .rejects.toThrow('disabled');
+    expect(review).not.toHaveBeenCalled(); expect(unavailable).not.toHaveBeenCalled();
+  });
+  it('cannot obtain an installed driver by omitting or forging mode authority', async () => {
+    const { installedFixtureDriver } = await import('./fixture-database.js');
+    for (const mode of [undefined, 'preflight', { mode: 'fixture-cycle', approved: true }]) {
+      await expect(Reflect.apply(installedFixtureDriver, undefined, [mode])).rejects.toThrow('disabled');
+    }
+    expect(unavailable).not.toHaveBeenCalled();
+  });
+  it.each(['fixture-preflight', 'fixture-cycle', 'fixture-child'] as const)(
+    'keeps the %s direct-entry branch disabled under simulated argv without spawning Node', async (entry) => {
+      const argv = process.argv; const code = process.exitCode;
+      const output = vi.spyOn(fs, 'writeSync').mockImplementation(() => 0);
+      syncBuiltinESMExports();
+      try {
+        vi.stubEnv('NODE_ENV', 'test'); vi.stubEnv('APPLYFLOW_FIXTURES_APPROVED', 'true');
+        vi.stubEnv('TEST_DATABASE_URL', 'postgresql://applyflow_test:offline-sentinel@127.0.0.1:5433/applyflow_test');
+        process.argv = [process.execPath, fileURLToPath(new URL(`./${entry}.ts`, import.meta.url)), '--approve'];
+        vi.resetModules();
+        if (entry === 'fixture-preflight') await import('./fixture-preflight.js');
+        else if (entry === 'fixture-cycle') await import('./fixture-cycle.js');
+        else await import('./fixture-child.js');
+        expect(process.exitCode).toBe(1);
+        expect(output).toHaveBeenCalledExactlyOnceWith(2, expect.stringContaining('APPLYFLOW_FIXTURES DISABLED:'));
+        expect(unavailable).not.toHaveBeenCalled();
+      } finally {
+        process.argv = argv; process.exitCode = code; output.mockRestore(); syncBuiltinESMExports();
+      }
+    }
+  );
   it('imports without environment admission, network, databases, or application processes', async () => {
     vi.stubEnv('NODE_ENV', 'production'); vi.stubEnv('TEST_DATABASE_URL', undefined);
     vi.stubEnv('PLAYWRIGHT_BROWSERS_PATH', undefined);
