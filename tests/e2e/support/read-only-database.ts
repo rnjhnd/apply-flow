@@ -29,12 +29,16 @@ export type PreflightFailureCode = 'ADMISSION' | 'CONNECT' | 'PEER' | 'SETTINGS'
   | 'CATALOG' | 'QUERY' | 'ROLLBACK' | 'CLOSE' | 'TIMEOUT' | 'INTERRUPTED' | 'CONNECTION';
 const failureCodes = new Set<string>(['ADMISSION', 'CONNECT', 'PEER', 'SETTINGS', 'QUIET',
   'CATALOG', 'QUERY', 'ROLLBACK', 'CLOSE', 'TIMEOUT', 'INTERRUPTED', 'CONNECTION']);
+export type PreflightFailureDetail = 'IDENTITY' | 'VERSION' | 'MIGRATION' | 'SCHEMA';
+const failureDetails = new Set<string>(['IDENTITY', 'VERSION', 'MIGRATION', 'SCHEMA']);
 export class ReadOnlyPreflightError extends Error {
   readonly code: PreflightFailureCode;
-  constructor(code: PreflightFailureCode) {
+  readonly detail: PreflightFailureDetail | undefined;
+  constructor(code: PreflightFailureCode, detail?: PreflightFailureDetail) {
     const safeCode = failureCodes.has(code) ? code : 'QUERY';
     super(`Read-only preflight failed: ${safeCode}.`);
     this.code = safeCode; this.name = 'ReadOnlyPreflightError';
+    this.detail = detail && failureDetails.has(detail) ? detail : undefined;
   }
 }
 
@@ -69,12 +73,15 @@ export async function inspectReadOnlyDatabase(source: DatabaseEnvironment, migra
   let target: ReturnType<typeof admitEnvironment>;
   try {
     target = admitEnvironment(source);
-    if (digest(migration) !== approvedChecksum) throw new Error();
   } catch { throw new ReadOnlyPreflightError('ADMISSION'); }
+  try { if (digest(migration) !== approvedChecksum) throw new Error(); }
+  catch { throw new ReadOnlyPreflightError('ADMISSION', 'MIGRATION'); }
   if (signal?.aborted) throw new ReadOnlyPreflightError('INTERRUPTED');
 
   let socket: Socket | undefined; let client: ReadOnlyClient | undefined;
   let failure: PreflightFailureCode | undefined;
+  let failureDetail: PreflightFailureDetail | undefined;
+  let stageDetail: PreflightFailureDetail | undefined;
   let stage: PreflightFailureCode = 'CONNECT'; let closing = false; let ended = false;
   let beginDispatched = false; let finished = false; let closed = false;
   const rollback: { requested: boolean; dispatched: boolean; outcome: 'unconfirmed' | 'confirmed' | 'failed' } = {
@@ -84,8 +91,8 @@ export async function inspectReadOnlyDatabase(source: DatabaseEnvironment, migra
   const stopped = new Promise<never>((_resolve, reject) => { rejectStopped = reject; });
   // Catch even if a synchronous constructor fails before the first await.
   void stopped.catch(() => undefined);
-  function fail(code: PreflightFailureCode) {
-    if (!failure) { failure = code; rejectStopped(new ReadOnlyPreflightError(code)); }
+  function fail(code: PreflightFailureCode, detail?: PreflightFailureDetail) {
+    if (!failure) { failure = code; failureDetail = detail; rejectStopped(new ReadOnlyPreflightError(code, detail)); }
   }
   function destroyOwned() { try { socket?.destroy(); } catch { fail('CLOSE'); } }
   // Latch cancellation immediately. Bounded cleanup may still send ROLLBACK on
@@ -94,7 +101,7 @@ export async function inspectReadOnlyDatabase(source: DatabaseEnvironment, migra
   function connectionFailed() { fail('CONNECTION'); }
   function connectionEnded() { ended = true; if (!closing) fail('CONNECTION'); }
   function assertAdmission() {
-    if (failure) throw new ReadOnlyPreflightError(failure);
+    if (failure) throw new ReadOnlyPreflightError(failure, failureDetail);
     if (signal?.aborted) throw new ReadOnlyPreflightError('INTERRUPTED');
     try {
       const current = admitEnvironment(source);
@@ -137,12 +144,20 @@ export async function inspectReadOnlyDatabase(source: DatabaseEnvironment, migra
     return result;
   }
   async function settings(inTransaction: boolean) {
-    stage = 'SETTINGS';
-    const parsed = settingsSchema.parse((await query(preflightControlSql.settings)).rows)[0]!;
+    stage = 'SETTINGS'; stageDetail = undefined;
+    const rows = (await query(preflightControlSql.settings)).rows;
+    if (!z.array(z.object({ database: z.literal('applyflow_test'), username: z.literal('applyflow_test'),
+      sessionUser: z.literal('applyflow_test') })).length(1).safeParse(rows).success) {
+      throw new ReadOnlyPreflightError('SETTINGS', 'IDENTITY');
+    }
+    if (!z.array(z.object({ version: z.string().regex(/^17\d{4}$/) })).length(1).safeParse(rows).success) {
+      throw new ReadOnlyPreflightError('SETTINGS', 'VERSION');
+    }
+    const parsed = settingsSchema.parse(rows)[0]!;
     if (inTransaction && parsed.isolation !== 'repeatable read') throw new ReadOnlyPreflightError('SETTINGS');
   }
   async function quiet() {
-    stage = 'QUIET';
+    stage = 'QUIET'; stageDetail = undefined;
     z.array(z.strictObject({ others: z.literal(0) })).length(1).parse((await query(preflightControlSql.quiet)).rows);
   }
 
@@ -173,12 +188,13 @@ export async function inspectReadOnlyDatabase(source: DatabaseEnvironment, migra
     stage = 'CATALOG';
     const inspection = await inspectReadOnlyCatalog(async (key) => {
       if (!Object.hasOwn(catalogText, key)) throw new ReadOnlyPreflightError('QUERY');
+      stageDetail = key === 'identity' ? 'IDENTITY' : key === 'history' ? 'MIGRATION' : 'SCHEMA';
       return (await query(catalogText[key])).rows;
     }, peer());
     if (inspection.identity.database !== target.database || inspection.identity.username !== target.username) {
-      throw new ReadOnlyPreflightError('CATALOG');
+      throw new ReadOnlyPreflightError('CATALOG', 'IDENTITY');
     }
-    stage = 'ROLLBACK';
+    stage = 'ROLLBACK'; stageDetail = undefined;
     if ((await query(preflightControlSql.rollback)).command !== 'ROLLBACK') throw new ReadOnlyPreflightError('ROLLBACK');
     rollback.outcome = 'confirmed';
     // A new autocommit read sees fresh activity instead of the transaction's
@@ -187,7 +203,8 @@ export async function inspectReadOnlyDatabase(source: DatabaseEnvironment, migra
     assertAdmission(); peer(); finished = true;
   } catch (error) {
     if (rollback.dispatched && rollback.outcome === 'unconfirmed' && !failure) rollback.outcome = 'failed';
-    fail(error instanceof ReadOnlyPreflightError ? error.code : stage);
+    fail(error instanceof ReadOnlyPreflightError ? error.code : stage,
+      error instanceof ReadOnlyPreflightError ? error.detail : stageDetail);
   }
   finally {
     clearTimeout(connectTimer);
@@ -230,7 +247,7 @@ export async function inspectReadOnlyDatabase(source: DatabaseEnvironment, migra
     signal?.removeEventListener('abort', interrupt);
   }
   if (failure || !finished || !rollback.requested || !rollback.dispatched || rollback.outcome !== 'confirmed' || !closed) {
-    throw new ReadOnlyPreflightError(failure ?? 'CLOSE');
+    throw new ReadOnlyPreflightError(failure ?? 'CLOSE', failureDetail);
   }
   return Object.freeze({ outcome: 'passed', readOnly: true, closed: true });
 }

@@ -69,15 +69,23 @@ describe('offline Playwright configuration/discovery', () => {
     ]);
     expect(unavailable).not.toHaveBeenCalled();
   });
-  it('B2 Gate A command cannot construct pg/socket dependencies even with explicit test credentials', async () => {
+  it('B2 explicit preflight rejects invalid shell admission before driver/socket loading', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('TEST_DATABASE_URL', 'postgresql://applyflow_test:offline-sentinel@127.0.0.1:5433/applyflow_test');
+    const { runPreflightCommand } = await import('./read-only-preflight.js');
+    const output = vi.fn();
+    expect(await runPreflightCommand({ environment: process.env, args: [], platform: 'win32',
+      signals: { on: unavailable, off: unavailable }, readMigration: unavailable,
+      driver: async () => unavailable(), output })).toBe(1);
+    expect(unavailable).not.toHaveBeenCalled();
+    expect(output).toHaveBeenCalledExactlyOnceWith('APPLYFLOW_PREFLIGHT ADMISSION: Explicit isolated test environment admission failed.');
+  });
+  it('valid test environment does not activate any driver just by importing the CLI', async () => {
     vi.stubEnv('NODE_ENV', 'test');
     vi.stubEnv('TEST_DATABASE_URL', 'postgresql://applyflow_test:offline-sentinel@127.0.0.1:5433/applyflow_test');
-    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    try {
-      const { runPreflightCommand } = await import('./read-only-preflight.js');
-      expect(await runPreflightCommand()).toBe(1); expect(unavailable).not.toHaveBeenCalled();
-      expect(log).toHaveBeenCalledExactlyOnceWith('Read-only preflight disabled: Gate B approval and review are required.');
-    } finally { log.mockRestore(); }
+    const { isPreflightEntrypoint } = await import('./read-only-preflight.js');
+    expect(isPreflightEntrypoint(process.argv[1])).toBe(false);
+    expect(unavailable).not.toHaveBeenCalled();
   });
   it('imports without environment admission, network, databases, or application processes', async () => {
     vi.stubEnv('NODE_ENV', 'production'); vi.stubEnv('TEST_DATABASE_URL', undefined);
