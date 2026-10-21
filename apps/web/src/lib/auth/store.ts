@@ -11,6 +11,7 @@ export type AuthState = Readonly<{
   retryAt: number | null;
   error: AuthFailure | null;
   outcomeUncertain: boolean;
+  verifiedReadId: number | null;
 }>;
 
 export function createAuthStore(options: { api: AuthApi; coordination: AuthCoordination | undefined; now?: () => number }) {
@@ -18,9 +19,11 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
   const now = options.now ?? Date.now;
   let state: AuthState = Object.freeze({ status: coordination ? 'initializing' : 'unavailable', user: null,
     registrationEnabled: null, busy: false, waiting: false, retryAt: null,
-    error: coordination ? null : new AuthFailure('coordination'), outcomeUncertain: false });
+    error: coordination ? null : new AuthFailure('coordination'), outcomeUncertain: false, verifiedReadId: null });
   let csrfToken: string | null = null;
   let generation = 0;
+  let readCounter = 0;
+  let verifiedGeneration: number | null = null;
   let disposed = false;
   let suspended = false;
   let pending: Promise<AuthState> | undefined;
@@ -34,11 +37,13 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
   function invalidate() {
     generation++;
     csrfToken = null;
+    verifiedGeneration = null;
     // Missing proof preserves the need for revalidation even when a pending operation or cooldown blocks it.
     // Do not claim initialization is running: recovery may require an explicit action after admission resumes.
     const error = state.retryAt !== null && state.retryAt > now()
       ? new AuthFailure('cooldown', 429, 'RATE_LIMITED', state.retryAt) : new AuthFailure('stale');
-    update({ status: state.outcomeUncertain ? 'uncertain' : 'unavailable', user: null, registrationEnabled: null, error });
+    update({ status: state.outcomeUncertain ? 'uncertain' : 'unavailable', user: null, registrationEnabled: null,
+      verifiedReadId: null, error });
   }
   function usable() {
     if (disposed || suspended || !coordination) throw new AuthFailure('coordination');
@@ -54,15 +59,19 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
       if (!(error instanceof AuthFailure && error.status === 401 && error.code === 'UNAUTHENTICATED')) throw error;
     }
     if (disposed || suspended || epoch !== generation) throw new AuthFailure('stale');
+    const replacesProof = csrfToken !== proof.csrfToken || state.user?.id !== user?.id;
     csrfToken = proof.csrfToken;
+    // A candidate is private until the coordinated operation settles. A later POST consumes it.
+    verifiedGeneration = epoch;
     update({ status: user ? 'authenticated' : 'anonymous', user: user ? Object.freeze({ ...user }) : null,
-      registrationEnabled: proof.registrationEnabled });
+      registrationEnabled: proof.registrationEnabled, ...(replacesProof ? { verifiedReadId: null } : {}) });
   }
   function unavailable(error: AuthFailure, uncertain: boolean) {
     csrfToken = null;
+    verifiedGeneration = null;
     const unresolved = uncertain || state.outcomeUncertain;
     update({ status: unresolved ? 'uncertain' : 'unavailable', user: null, registrationEnabled: null,
-      error, outcomeUncertain: unresolved, retryAt: error.retryAt });
+      error, outcomeUncertain: unresolved, retryAt: error.retryAt, verifiedReadId: null });
   }
   function start(work: () => Promise<void>): Promise<AuthState> {
     try { usable(); } catch (error) { return Promise.reject(error); }
@@ -74,10 +83,14 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
       throw failure;
     }).finally(() => {
       clearTimeout(timer);
+      const verifiedReadId = verifiedGeneration === generation && csrfToken !== null && !disposed && !suspended
+        && (state.status === 'anonymous' || state.status === 'authenticated') ? ++readCounter : null;
+      verifiedGeneration = null;
       pending = undefined;
-      update({ busy: false, waiting: false });
+      update({ busy: false, waiting: false, verifiedReadId });
     }).then(() => state);
     pending = task;
+    verifiedGeneration = null;
     update({ busy: true, waiting: false, error: null, retryAt: null });
     return task;
   }
@@ -118,6 +131,10 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
         if (csrfToken !== intendedProof || (state.user?.id ?? null) !== intendedUser) throw new AuthFailure('stale');
         if (kind === 'register' && !state.registrationEnabled) throw new AuthFailure('validation', 404, 'NOT_FOUND');
         const epoch = generation;
+        // Preflight verification cannot authorize the session after a cookie-changing POST.
+        verifiedGeneration = null;
+        update({ verifiedReadId: null });
+        if (epoch !== generation || csrfToken !== intendedProof) throw new AuthFailure('stale');
         dispatched = true;
         if (kind === 'logout') {
           await api.logout(csrfToken);
@@ -184,8 +201,10 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
     logout: () => mutation('logout'),
     dispose() {
       disposed = true; generation++; csrfToken = null;
+      verifiedGeneration = null;
       unsubscribe?.(); coordination?.close(); listeners.clear();
-      update({ status: 'unavailable', user: null, registrationEnabled: null, error: new AuthFailure('coordination') });
+      update({ status: 'unavailable', user: null, registrationEnabled: null, verifiedReadId: null,
+        error: new AuthFailure('coordination') });
       // Never abort an in-flight request or release its lock early.
     }
   };

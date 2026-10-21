@@ -48,6 +48,126 @@ function browser() {
 }
 afterEach(() => { vi.useRealTimers(); });
 
+describe('authoritative verification receipts', () => {
+  it('publishes only after coordinated verification settles; cached bootstrap cannot issue another receipt', async () => {
+    const api = transport(); const gate = deferred<Awaited<ReturnType<AuthApi['me']>>>();
+    api.me.mockReturnValueOnce(gate.promise);
+    const store = createAuthStore({ api, coordination: browser().tab() });
+    const seen: ReturnType<typeof store.getSnapshot>[] = [];
+    const off = store.subscribe(() => seen.push(store.getSnapshot()));
+    expect(store.getSnapshot().verifiedReadId).toBeNull();
+    const operation = store.bootstrap(); expect(store.bootstrap()).toBe(operation);
+    await vi.waitFor(() => expect(api.me).toHaveBeenCalledOnce());
+    expect(store.getSnapshot().verifiedReadId).toBeNull();
+    gate.resolve({ user }); await operation;
+    expect(store.getSnapshot()).toMatchObject({ verifiedReadId: 1, status: 'authenticated', busy: false });
+    expect(seen.filter((snapshot) => snapshot.verifiedReadId !== null).every((snapshot) => !snapshot.busy)).toBe(true);
+    await store.bootstrap(); expect(store.getSnapshot().verifiedReadId).toBe(1); expect(api.csrf).toHaveBeenCalledOnce();
+    await store.revalidate(); expect(store.getSnapshot().verifiedReadId).toBe(2); expect(api.csrf).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(store.getSnapshot())).not.toContain(proof);
+    off(); store.dispose();
+  });
+  it.each(['login', 'register', 'logout'] as const)('invalidates on %s dispatch and never issues a receipt from success or joining the mutation', async (kind) => {
+    const api = transport(); const gate = deferred<void>();
+    if (kind === 'logout') api.me.mockResolvedValue({ user });
+    api.login.mockImplementation(async () => { await gate.promise; return { user, csrfToken: rotated }; });
+    api.register.mockImplementation(async () => { await gate.promise; return { user, csrfToken: rotated }; });
+    api.logout.mockReturnValue(gate.promise);
+    const store = createAuthStore({ api, coordination: browser().tab() });
+    await store.bootstrap(); expect(store.getSnapshot().verifiedReadId).toBe(1);
+    const operation = kind === 'logout' ? store.logout() : store[kind](credentials);
+    await vi.waitFor(() => expect(api[kind]).toHaveBeenCalledOnce());
+    expect(store.getSnapshot()).toMatchObject({ verifiedReadId: null, busy: true });
+    const joined = store.bootstrap(); gate.resolve(); await operation; await joined;
+    expect(store.getSnapshot()).toMatchObject({ verifiedReadId: null, busy: false });
+    await store.bootstrap();
+    // Login/register retain private proof but cached bootstrap still cannot manufacture read freshness.
+    expect(store.getSnapshot().verifiedReadId).toBe(kind === 'logout' ? 2 : null);
+    await store.revalidate(); expect(store.getSnapshot().verifiedReadId).toBe(kind === 'logout' ? 3 : 2);
+    store.dispose(); expect(store.getSnapshot().verifiedReadId).toBeNull();
+  });
+  it('rejects stale generations and never reuses a receipt after repeated invalidation', async () => {
+    const api = transport(); const tabs = browser(); const other = tabs.tab();
+    const store = createAuthStore({ api, coordination: tabs.tab() }); await store.bootstrap();
+    const gate = deferred<Awaited<ReturnType<AuthApi['me']>>>();
+    api.me.mockReturnValueOnce(gate.promise).mockImplementationOnce(async () => { other.publish(); return { user }; });
+    const seen: (number | null)[] = []; const off = store.subscribe(() => seen.push(store.getSnapshot().verifiedReadId));
+    const operation = store.revalidate(); const rejected = expect(operation).rejects.toMatchObject({ kind: 'stale' });
+    await vi.waitFor(() => expect(api.me).toHaveBeenCalledTimes(2));
+    other.publish(); expect(store.getSnapshot().verifiedReadId).toBeNull(); seen.length = 0;
+    gate.resolve({ user }); await rejected;
+    expect(seen.every((id) => id === null)).toBe(true);
+    expect(store.getSnapshot()).toMatchObject({ verifiedReadId: null, status: 'unavailable', busy: false });
+    await store.revalidate(); expect(store.getSnapshot().verifiedReadId).toBe(2);
+    off(); store.dispose();
+  });
+  it('clears receipts on suspension, failure and disposal while keeping the lifetime counter monotonic', async () => {
+    const api = transport(); const coordination = browser().tab();
+    let notify!: (event: AuthCoordinationEvent) => void;
+    coordination.subscribe = (listener) => { notify = listener; return () => {}; };
+    const store = createAuthStore({ api, coordination }); await store.bootstrap();
+    notify('suspend'); expect(store.getSnapshot().verifiedReadId).toBeNull();
+    notify('invalidate'); expect(store.getSnapshot().verifiedReadId).toBeNull();
+    notify('resume'); await store.bootstrap(); expect(store.getSnapshot().verifiedReadId).toBe(2);
+    api.me.mockRejectedValueOnce(new AuthFailure('http', 503));
+    await expect(store.revalidate()).rejects.toMatchObject({ status: 503 });
+    expect(store.getSnapshot().verifiedReadId).toBeNull();
+    await store.revalidate(); expect(store.getSnapshot().verifiedReadId).toBe(3);
+    store.dispose(); expect(store.getSnapshot().verifiedReadId).toBeNull();
+  });
+  it('does not reuse a receipt invalidated reentrantly at publication', async () => {
+    const api = transport(); const coordination = browser().tab();
+    let notify!: (event: AuthCoordinationEvent) => void;
+    coordination.subscribe = (listener) => { notify = listener; return () => {}; };
+    const store = createAuthStore({ api, coordination });
+    const off = store.subscribe(() => { if (store.getSnapshot().verifiedReadId === 1) notify('suspend'); });
+    await store.revalidate(); expect(store.getSnapshot()).toMatchObject({ verifiedReadId: null, status: 'unavailable' });
+    off(); notify('resume'); await store.bootstrap(); expect(store.getSnapshot().verifiedReadId).toBe(2);
+    store.dispose();
+  });
+  it('issues a receipt for real post-mutation reconciliation without resolving an ambiguous registration outcome', async () => {
+    const api = transport(); const store = createAuthStore({ api, coordination: browser().tab() });
+    await store.bootstrap();
+    api.register.mockImplementation(async () => {
+      api.me.mockResolvedValue({ user }); api.csrf.mockResolvedValue({ csrfToken: rotated, registrationEnabled: true });
+      throw new AuthFailure('network');
+    });
+    await expect(store.register(credentials)).rejects.toMatchObject({ kind: 'network' });
+    expect(store.getSnapshot()).toMatchObject({ status: 'authenticated', outcomeUncertain: true, verifiedReadId: 2 });
+    expect(api.me).toHaveBeenCalledTimes(3); expect(api.register).toHaveBeenCalledOnce();
+    await store.bootstrap(); expect(store.getSnapshot().verifiedReadId).toBe(2);
+    await store.revalidate(); expect(store.getSnapshot()).toMatchObject({ verifiedReadId: 3, outcomeUncertain: true });
+    store.dispose();
+  });
+  it('rechecks generation when receipt invalidation notifies observers before mutation dispatch', async () => {
+    const api = transport(); const tabs = browser(); const other = tabs.tab();
+    const store = createAuthStore({ api, coordination: tabs.tab() }); await store.bootstrap();
+    let invalidated = false;
+    const off = store.subscribe(() => {
+      const snapshot = store.getSnapshot();
+      if (!invalidated && snapshot.busy && snapshot.status === 'anonymous' && snapshot.verifiedReadId === null) {
+        invalidated = true; other.publish();
+      }
+    });
+    await expect(store.login(credentials)).rejects.toMatchObject({ kind: 'stale' });
+    expect(invalidated).toBe(true); expect(api.login).not.toHaveBeenCalled();
+    expect(store.getSnapshot()).toMatchObject({ verifiedReadId: null, status: 'unavailable', busy: false });
+    off(); store.dispose();
+  });
+  it('invalidates an old receipt when verification replaces its session proof before publishing the new receipt', async () => {
+    const api = transport(); const store = createAuthStore({ api, coordination: browser().tab() });
+    await store.bootstrap(); expect(store.getSnapshot().verifiedReadId).toBe(1);
+    api.csrf.mockResolvedValue({ csrfToken: rotated, registrationEnabled: true }); api.me.mockResolvedValue({ user });
+    const seen: ReturnType<typeof store.getSnapshot>[] = [];
+    const off = store.subscribe(() => seen.push(store.getSnapshot()));
+    await store.revalidate();
+    const replaced = seen.filter((snapshot) => snapshot.busy && snapshot.status === 'authenticated');
+    expect(replaced.length).toBeGreaterThan(0); expect(replaced.every((snapshot) => snapshot.verifiedReadId === null)).toBe(true);
+    expect(store.getSnapshot()).toMatchObject({ verifiedReadId: 2, status: 'authenticated', busy: false });
+    off(); store.dispose();
+  });
+});
+
 describe('authentication state and operation ordering', () => {
   it('settles invalidation during 429 cooldown and recovers explicitly at the exact deadline', async () => {
     vi.useFakeTimers();
