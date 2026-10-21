@@ -236,3 +236,92 @@ The palette and font choices follow `DESIGN_SYSTEM.md`. Text/button color pairs 
 - [DESIGN_SYSTEM.md](DESIGN_SYSTEM.md): visual direction and accessibility requirements.
 
 The initial database migration was explicitly approved and applied locally. No migrations, authentication, later-checkpoint features, commits, pushes, or deployments are performed automatically by this setup.
+# Stage 2C.3A: offline browser harness foundation
+
+Playwright is pinned to `1.64.1`. Its matching Chromium download is kept in ignored
+`.cache/ms-playwright`; no browser is launched during offline verification.
+
+```powershell
+npm.cmd run test:e2e:list
+npm.cmd run test:e2e:offline
+```
+
+Listing discovers one clearly marked runtime sentinel, **not an implemented browser
+authentication scenario**. Configuration/discovery does not load `.env`, connect to
+PostgreSQL, start an application, or launch a browser. `test:e2e` deliberately exits
+with an error until the separately approved Stage 2C.3B runtime is implemented.
+Direct execution also encounters an automatic fail-closed fixture before requesting
+browser fixtures. Do not run live E2E or integration tests for Stage 2C.3A.
+
+To reproduce the approved Chromium download only (no system packages/other engines):
+
+```powershell
+$env:PLAYWRIGHT_BROWSERS_PATH = Join-Path (Get-Location) '.cache/ms-playwright'
+npm.cmd exec -- playwright install chromium
+```
+
+Playwright also downloads its own headless shell, FFmpeg, and Windows inspection
+helper into that cache. This does not install system packages. The config fixes the
+same repository-local browser location for future execution.
+
+## Guarded runtime work deferred to Stage 2C.3B
+
+The offline support modules accept injected database/process interfaces; **no live
+adapter, authentication server, cleanup executor, or account creation is wired**.
+Future composition must use compiled API/frontend assets, bypass normal `server.ts`
+startup and its global cleanup, and verify all guards before listening or writing:
+
+- Explicit `NODE_ENV=test`; explicit `TEST_DATABASE_URL` targeting only
+  `127.0.0.1:5433/applyflow_test` as `applyflow_test`; no development fallback.
+- Reject inherited `PG*`, connection/runtime overrides; construct a small child
+  environment allowlist, never forward all of `process.env` or load `.env` wholesale.
+- Check approved SQL bytes (`0001_init_auth`, SHA-256
+  `98fab302c1f9d6a053d549bdbb9aec2bece4e24322fb1292948647ed693ac840`), connected
+  database/user/client endpoint, and exactly one completed matching migration.
+  Endpoint means the client host port, not PostgreSQL's container-internal port.
+- Revalidate target/identity/history before future fixture/cleanup transactions.
+- Bind port zero on `127.0.0.1`, derive the exact trusted Origin from the owned
+  listener, and accept readiness only from the child IPC channel with its run ID.
+  No externally supplied base URL, existing-server reuse, or PID/port-owner killing.
+- Fresh server and browser context per future test; one worker, no retries,
+  service workers blocked, no saved authentication state, traces/screenshots/video off.
+  Mobile, keyboard, BFCache, and real cookie/authentication coverage remain future work.
+
+`createApp(..., { serveFrontend: true })` permits only test composition to reuse the
+existing **fixed** compiled frontend paths; production serves those paths by default
+and development/test remain API-only by default. Normal startup is unchanged.
+
+## Fixture ownership and interruption safety
+
+The journal implementation uses fixed `.cache/e2e/<run UUID>/<test UUID>.jsonl`
+paths, exclusive creation, append-only validated snapshots, complete synchronous
+writes, and `fsync` before allowing a fixture write/token return. Its private file
+mode is not a claim about Windows ACL isolation. Only exact owned emails, user UUIDs,
+and candidate token hashes are permitted; no raw tokens, CSRF proof, passwords,
+cookies, or database URLs. Malformed, missing, partial, competing, or ambiguous
+journals fail closed. Empty ownership sets produce no cleanup targets.
+
+**One writer per journal:** future child composition owns its journal and all token
+factory calls. The parent must request durable exact email/seed-ID intent recording
+over IPC and receive acknowledgment **before** issuing an associated browser request
+or seed write. It must not independently append while the child writes. Inject the
+same recording factory into both session and authentication services. Existing
+cryptographic generation is unchanged; both session/CSRF candidate hashes are recorded
+before insertion, and unmatched candidates require no deletion.
+
+Cleanup is only a pure plan in this stage. Future cleanup must wait for observed
+child exit, resolve **exact** journaled email intents, journal resolved UUIDs, and
+delete users by UUID **and exact owned email**, with only exact owned session hashes
+eligible for session cleanup. Cascading user-session removal must remain confined to
+the owned graph. Prefix, age, expiry, missing metadata, or sending a shutdown/kill
+request alone never authorize deletion. No reset/truncate/broad cleanup is provided.
+
+IPC disconnects, startup timeouts, and process errors initiate bounded owned-child
+shutdown; unconfirmed exit retains fixtures for manual review. Running journals are
+reported as review-required after interruption, never automatically cleaned. An
+abandoned-run cleanup workflow requires separate approval; no cleanup CLI is supplied.
+
+Offline mocks demonstrate guard logic and ordering, **not live database safety or
+browser behavior**. Live connections, fixture writes/narrow cleanup, server startup,
+and browser authentication execution require Stage 2C.3B approval. Schema/migration,
+CI, deployment, and Git publication changes remain outside that approval.

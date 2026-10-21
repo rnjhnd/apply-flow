@@ -8,7 +8,12 @@ import type { Env } from './config/env.js';
 import { createAuthHttp, type AuthHttpOptions } from './modules/auth/csrf.js';
 import { AuthHttpError } from './modules/auth/http-error.js';
 
-export function createApp(env: Env, authentication: AuthHttpOptions) {
+export type AppOptions = { serveFrontend?: true };
+
+export function createApp(env: Env, authentication: AuthHttpOptions, options: AppOptions = {}) {
+  if (options.serveFrontend && env.NODE_ENV !== 'test') {
+    throw new Error('Explicit frontend serving is restricted to test composition.');
+  }
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', false);
@@ -31,7 +36,7 @@ export function createApp(env: Env, authentication: AuthHttpOptions) {
   // Unknown API routes must never receive the frontend HTML fallback.
   app.use('/api', notFound);
 
-  if (env.NODE_ENV === 'production') {
+  if (env.NODE_ENV === 'production' || options.serveFrontend === true) {
     const webRoot = fileURLToPath(new URL('../../web/dist/', import.meta.url));
     const indexFile = fileURLToPath(new URL('../../web/dist/index.html', import.meta.url));
     if (!existsSync(indexFile)) {

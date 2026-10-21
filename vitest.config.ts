@@ -6,7 +6,8 @@ export default defineConfig({
     clearMocks: true,
     projects: [
       { test: { name: 'unit', environment: 'node',
-        include: ['apps/api/src/**/*.test.ts', 'apps/web/src/**/*.test.ts', 'packages/contracts/src/**/*.test.ts'] } },
+        include: ['apps/api/src/**/*.test.ts', 'apps/web/src/**/*.test.ts', 'packages/contracts/src/**/*.test.ts',
+          'tests/e2e/support/**/*.test.ts'] } },
       'apps/web/vitest.config.ts'
     ]
   }
