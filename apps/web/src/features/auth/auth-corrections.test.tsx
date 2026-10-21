@@ -172,11 +172,11 @@ describe('freshness-driven external recovery', () => {
     await act(async () => { await setup.store.login(credentials); });
     expect(setup.store.getSnapshot()).toMatchObject({ status: 'authenticated', verifiedReadId: null, busy: false });
     expect(screen.getByLabelText('Current path').textContent).toBe('/login');
-    expect(screen.queryByRole('heading', { name: 'Workspace route verified' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Your workspace' })).toBeNull();
     await act(async () => { await setup.store.bootstrap(); });
     expect(setup.api.csrf).toHaveBeenCalledTimes(2); expect(screen.getByLabelText('Current path').textContent).toBe('/login');
     await userEvent.setup().click(screen.getByRole('button', { name: 'Check session' }));
-    expect(await screen.findByRole('heading', { name: 'Workspace route verified' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Your workspace' })).toBeTruthy();
     expect(setup.api.csrf).toHaveBeenCalledTimes(4); expect(setup.api.login).toHaveBeenCalledOnce();
   });
 });

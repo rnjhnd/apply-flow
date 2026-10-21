@@ -10,6 +10,7 @@ export type AuthState = Readonly<{
   waiting: boolean;
   retryAt: number | null;
   error: AuthFailure | null;
+  // Persistent authentication-mutation ambiguity, not a failed session read.
   outcomeUncertain: boolean;
   verifiedReadId: number | null;
 }>;
@@ -66,12 +67,14 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
     update({ status: user ? 'authenticated' : 'anonymous', user: user ? Object.freeze({ ...user }) : null,
       registrationEnabled: proof.registrationEnabled, ...(replacesProof ? { verifiedReadId: null } : {}) });
   }
-  function unavailable(error: AuthFailure, uncertain: boolean) {
+  function unavailable(error: AuthFailure, uncertainty: 'read' | 'mutation' | null) {
     csrfToken = null;
     verifiedGeneration = null;
-    const unresolved = uncertain || state.outcomeUncertain;
-    update({ status: unresolved ? 'uncertain' : 'unavailable', user: null, registrationEnabled: null,
-      error, outcomeUncertain: unresolved, retryAt: error.retryAt, verifiedReadId: null });
+    // A read can make the session indeterminate without inventing a potentially
+    // committed authentication mutation. Existing mutation ambiguity survives it.
+    const unresolvedMutation = uncertainty === 'mutation' || state.outcomeUncertain;
+    update({ status: uncertainty !== null || unresolvedMutation ? 'uncertain' : 'unavailable', user: null, registrationEnabled: null,
+      error, outcomeUncertain: unresolvedMutation, retryAt: error.retryAt, verifiedReadId: null });
   }
   function start(work: () => Promise<void>): Promise<AuthState> {
     try { usable(); } catch (error) { return Promise.reject(error); }
@@ -79,7 +82,7 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
     const task = Promise.resolve().then(() => coordination!.exclusive(work)).catch((error: unknown) => {
       if (error instanceof AuthFailure) throw error;
       const failure = new AuthFailure('coordination');
-      unavailable(failure, false);
+      unavailable(failure, null);
       throw failure;
     }).finally(() => {
       clearTimeout(timer);
@@ -108,7 +111,7 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
       }
       catch (error) {
         const failure = error instanceof AuthFailure ? error : new AuthFailure('network');
-        unavailable(failure, failure.kind === 'network' || failure.kind === 'protocol');
+        unavailable(failure, failure.kind === 'network' || failure.kind === 'protocol' ? 'read' : null);
         throw failure;
       }
     });
@@ -163,7 +166,7 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
       } catch (error) {
         const failure = error instanceof AuthFailure ? error : new AuthFailure('network');
         const ambiguous = dispatched && (failure.kind === 'network' || failure.kind === 'protocol' || failure.status >= 500);
-        if (reconciled) unavailable(failure, true);
+        if (reconciled) unavailable(failure, 'mutation');
         else if (failure.status === 429) update({ error: failure, retryAt: failure.retryAt ?? now() + 60_000 });
         else if (dispatched && (ambiguous || [401, 403, 409].includes(failure.status))
           && failure.code !== 'INVALID_CREDENTIALS') {
@@ -172,10 +175,10 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
           try { await synchronize(); update({ error: failure, outcomeUncertain: ambiguous || state.outcomeUncertain }); }
           catch (recovery) {
             const recoveryFailure = recovery instanceof AuthFailure ? recovery : new AuthFailure('network');
-            unavailable(recoveryFailure, ambiguous);
+            unavailable(recoveryFailure, ambiguous ? 'mutation' : null);
           }
         } else if (!dispatched && failure.kind !== 'stale' && failure.kind !== 'validation') {
-          unavailable(failure, failure.kind === 'network' || failure.kind === 'protocol');
+          unavailable(failure, failure.kind === 'network' || failure.kind === 'protocol' ? 'read' : null);
         }
         else update({ error: failure });
         throw failure;

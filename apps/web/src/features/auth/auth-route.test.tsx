@@ -53,7 +53,7 @@ describe('authentication route integration', () => {
     button.focus(); expect(document.activeElement).toBe(button);
     await userEvent.setup().keyboard('{Enter}');
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeTruthy();
-    expect(setup.api.csrf).toHaveBeenCalledTimes(2); expect(document.querySelector('form')).toBeNull();
+    expect(setup.api.csrf).toHaveBeenCalledTimes(2); expect(screen.getByRole('form', { name: 'Sign in' })).toBeTruthy();
   });
   it('exposes explicit recovery for the accepted invalidation-then-400 regression without replay', async () => {
     const setup = start('/login'); await screen.findByRole('heading', { name: 'Sign in' });
@@ -86,7 +86,7 @@ describe('authentication route integration', () => {
     const setup = fixture({ authenticated: true }); await setup.store.bootstrap();
     setup.api.me.mockRejectedValue(new AuthFailure('http', 401, 'UNAUTHENTICATED'));
     start('/app', setup);
-    expect(screen.queryByRole('heading', { name: 'Workspace route verified' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Your workspace' })).toBeNull();
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeTruthy();
     expect(screen.getByLabelText('Current path').textContent).toBe('/login');
   });
@@ -110,30 +110,31 @@ describe('authentication route integration', () => {
     const setup = fixture({ authenticated: true }); await setup.store.bootstrap();
     const gate = deferred<Awaited<ReturnType<AuthApi['me']>>>(); setup.api.me.mockReturnValueOnce(gate.promise);
     start('/app', setup);
-    expect(screen.queryByRole('heading', { name: 'Workspace route verified' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Your workspace' })).toBeNull();
     expect(screen.getByRole('heading', { name: 'Checking your session' })).toBeTruthy();
-    await act(async () => { gate.resolve({ user }); });
-    expect(await screen.findByRole('heading', { name: 'Workspace route verified' })).toBeTruthy();
-    expect(setup.api.csrf).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).not.toContain(user.email);
+    await act(async () => { gate.resolve({ user }); });
+    expect(await screen.findByRole('heading', { name: 'Your workspace' })).toBeTruthy();
+    expect(setup.api.csrf).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain(user.email);
     expect(document.body.textContent).not.toContain(proof);
   });
   it('redirects a verified anonymous protected visit to login', async () => {
     start('/app');
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeTruthy();
     expect(screen.getByLabelText('Current path').textContent).toBe('/login');
-    expect(screen.queryByRole('heading', { name: 'Workspace route verified' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Your workspace' })).toBeNull();
   });
   it.each(['/login', '/register'])('redirects authenticated %s to the protected boundary', async (path) => {
     const setup = start(path, fixture({ authenticated: true }));
-    expect(await screen.findByRole('heading', { name: 'Workspace route verified' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Your workspace' })).toBeTruthy();
     expect(screen.getByLabelText('Current path').textContent).toBe('/app');
     expect(setup.api.login).not.toHaveBeenCalled(); expect(setup.api.register).not.toHaveBeenCalled();
   });
-  it('renders registration placeholder only after explicit server permission', async () => {
+  it('renders registration form only after explicit server permission', async () => {
     start('/register', fixture({ registration: true }));
     expect(await screen.findByRole('heading', { name: 'Create an account' })).toBeTruthy();
-    expect(document.querySelector('form')).toBeNull();
+    expect(screen.getByRole('form', { name: 'Create an account' })).toBeTruthy();
   });
   it('explains disabled direct registration and provides a working Sign in link', async () => {
     start('/register');
@@ -159,7 +160,7 @@ describe('authentication route integration', () => {
     expect(screen.getByLabelText('Current path').textContent).toBe('/app');
     expect(screen.getByText(/does not mean you have been signed out/)).toBeTruthy();
     await userEvent.setup().click(button);
-    expect(await screen.findByRole('heading', { name: 'Workspace route verified' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Your workspace' })).toBeTruthy();
     expect(setup.api.csrf).toHaveBeenCalledTimes(2);
     expect(setup.api.login).not.toHaveBeenCalled(); expect(setup.api.logout).not.toHaveBeenCalled();
   });
@@ -174,7 +175,7 @@ describe('authentication route integration', () => {
     setup.api.register.mockImplementation(async () => { setup.api.me.mockResolvedValue({ user }); throw new AuthFailure('network'); });
     await expect(setup.store.register(credentials)).rejects.toMatchObject({ kind: 'network' });
     start('/app', setup);
-    expect(await screen.findByRole('heading', { name: 'Workspace route verified' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Your workspace' })).toBeTruthy();
     expect(screen.getByText(/outcome of an earlier request may differ/)).toBeTruthy();
     expect(setup.store.getSnapshot().outcomeUncertain).toBe(true); expect(setup.api.register).toHaveBeenCalledOnce();
   });
@@ -187,7 +188,7 @@ describe('authentication route integration', () => {
     expect(screen.getByRole('heading', { name: 'Checking your session' })).toBeTruthy();
     setup.api.csrf.mockResolvedValue({ csrfToken: rotated, registrationEnabled: true }); setup.api.me.mockResolvedValue({ user });
     await act(async () => { gate.resolve({ user, csrfToken: rotated }); await operation; });
-    expect(await screen.findByRole('heading', { name: 'Workspace route verified' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Your workspace' })).toBeTruthy();
     expect(setup.api.login).toHaveBeenCalledOnce();
   });
   it('obtains fresh proof after joining a pending logout instead of assuming anonymous is form-ready', async () => {

@@ -10,7 +10,7 @@ export function RouteShell() {
   }, [location.pathname]);
   return <div className="mx-auto flex min-h-dvh max-w-7xl flex-col px-6 sm:px-12 lg:px-20">
     <a href="#main" className="skip-link">Skip to content</a>
-    <header className="flex items-center justify-between gap-4 border-b border-border py-7 sm:py-9">
+    <header className="flex flex-col items-start justify-between gap-3 border-b border-border py-7 sm:flex-row sm:items-center sm:py-9">
       <Link to="/" className="font-heading text-xl font-bold tracking-tight">ApplyFlow</Link>
       <span className="text-xs text-muted-foreground">A focused space for your job search</span>
     </header>

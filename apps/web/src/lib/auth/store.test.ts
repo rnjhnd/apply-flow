@@ -48,6 +48,39 @@ function browser() {
 }
 afterEach(() => { vi.useRealTimers(); });
 
+describe('read-only versus mutation uncertainty', () => {
+  it.each(['csrf', 'me'] as const)('recovers a failed %s read without inventing mutation ambiguity or a receipt', async (endpoint) => {
+    const api = transport(); api[endpoint].mockRejectedValueOnce(new AuthFailure('network'));
+    const store = createAuthStore({ api, coordination: browser().tab() });
+    await expect(store.bootstrap()).rejects.toMatchObject({ kind: 'network' });
+    expect(store.getSnapshot()).toMatchObject({ status: 'uncertain', outcomeUncertain: false, verifiedReadId: null, busy: false });
+    expect(await store.revalidate()).toMatchObject({ status: 'anonymous', outcomeUncertain: false,
+      registrationEnabled: true, verifiedReadId: 1, busy: false });
+    expect(api.register).not.toHaveBeenCalled(); expect(api.login).not.toHaveBeenCalled(); expect(api.logout).not.toHaveBeenCalled();
+    store.dispose();
+  });
+  it('does not create mutation ambiguity when a registration preflight fails before dispatch', async () => {
+    const api = transport(); const store = createAuthStore({ api, coordination: browser().tab() }); await store.bootstrap();
+    api.me.mockRejectedValueOnce(new AuthFailure('network'));
+    await expect(store.register(credentials)).rejects.toMatchObject({ kind: 'network' });
+    expect(store.getSnapshot()).toMatchObject({ status: 'uncertain', outcomeUncertain: false, verifiedReadId: null });
+    expect(api.register).not.toHaveBeenCalled();
+    expect(await store.revalidate()).toMatchObject({ status: 'anonymous', outcomeUncertain: false, verifiedReadId: 2 });
+    store.dispose();
+  });
+  it.each(['csrf', 'me'] as const)('preserves genuine registration ambiguity through a later failed %s read and anonymous recovery', async (endpoint) => {
+    const api = transport(); const store = createAuthStore({ api, coordination: browser().tab() }); await store.bootstrap();
+    api.register.mockRejectedValueOnce(new AuthFailure('network'));
+    await expect(store.register(credentials)).rejects.toMatchObject({ kind: 'network' });
+    expect(store.getSnapshot()).toMatchObject({ status: 'anonymous', outcomeUncertain: true, verifiedReadId: 2 });
+    api[endpoint].mockRejectedValueOnce(new AuthFailure('network'));
+    await expect(store.revalidate()).rejects.toMatchObject({ kind: 'network' });
+    expect(store.getSnapshot()).toMatchObject({ status: 'uncertain', outcomeUncertain: true, verifiedReadId: null });
+    expect(await store.revalidate()).toMatchObject({ status: 'anonymous', outcomeUncertain: true, verifiedReadId: 3 });
+    expect(api.register).toHaveBeenCalledOnce(); store.dispose();
+  });
+});
+
 describe('authoritative verification receipts', () => {
   it('publishes only after coordinated verification settles; cached bootstrap cannot issue another receipt', async () => {
     const api = transport(); const gate = deferred<Awaited<ReturnType<AuthApi['me']>>>();
