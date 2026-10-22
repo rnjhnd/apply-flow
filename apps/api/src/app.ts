@@ -7,8 +7,11 @@ import { healthResponseSchema } from '@applyflow/contracts';
 import type { Env } from './config/env.js';
 import { createAuthHttp, type AuthHttpOptions } from './modules/auth/csrf.js';
 import { AuthHttpError } from './modules/auth/http-error.js';
+import { ApplicationHttpError } from './modules/applications/http-error.js';
+import { createApplicationsHttp } from './modules/applications/routes.js';
+import type { ApplicationService } from './modules/applications/service.js';
 
-export type AppOptions = { serveFrontend?: true };
+export type AppOptions = { serveFrontend?: true; applications?: ApplicationService };
 
 export function createApp(env: Env, authentication: AuthHttpOptions, options: AppOptions = {}) {
   if (options.serveFrontend && env.NODE_ENV !== 'test') {
@@ -20,8 +23,11 @@ export function createApp(env: Env, authentication: AuthHttpOptions, options: Ap
   app.use(helmet());
   const auth = createAuthHttp(authentication);
   app.use('/api/v1/auth', ...auth.admission);
+  const applications = options.applications ? createApplicationsHttp(authentication.config, options.applications) : undefined;
+  if (applications) app.use('/api/applications', applications.beforeJson);
   app.use(express.json({ limit: '16kb' }));
   app.use('/api/v1/auth', auth.router);
+  if (applications) app.use('/api/applications', applications.router);
 
   app.get('/api/v1/health/live', (_req, res) => {
     res.set('Cache-Control', 'no-store').json(healthResponseSchema.parse({
@@ -57,6 +63,11 @@ export function createApp(env: Env, authentication: AuthHttpOptions, options: Ap
   app.use(notFound);
   const errorHandler: ErrorRequestHandler = (error: unknown, _req, res, next) => {
     if (res.headersSent) return next(error);
+    if (error instanceof ApplicationHttpError) {
+      res.status(error.status).json({ code: error.code, message: error.message,
+        ...(error.fieldErrors === undefined ? {} : { fieldErrors: error.fieldErrors }) });
+      return;
+    }
     if (error instanceof AuthHttpError) {
       if (error.retryAfter !== undefined) res.set('Retry-After', String(error.retryAfter));
       res.status(error.status).json({ code: error.code, message: error.message,

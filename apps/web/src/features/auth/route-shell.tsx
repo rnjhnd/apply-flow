@@ -14,7 +14,7 @@ export function RouteShell() {
       <Link to="/" className="font-heading text-xl font-bold tracking-tight">ApplyFlow</Link>
       <span className="text-xs text-muted-foreground">A focused space for your job search</span>
     </header>
-    <main id="main" tabIndex={-1} className="flex-1 py-16 sm:py-24"><div className="max-w-xl"><Outlet /></div></main>
+    <main id="main" tabIndex={-1} className="flex-1 py-16 sm:py-24"><div className={location.pathname === '/app' ? 'min-w-0' : 'max-w-xl'}><Outlet /></div></main>
     <footer className="border-t border-border py-6 text-xs text-muted-foreground">Your next chapter, with a clearer view.</footer>
   </div>;
 }

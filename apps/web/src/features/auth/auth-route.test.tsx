@@ -10,6 +10,13 @@ import { AuthProvider } from './auth-provider';
 import { AuthRoute } from './auth-route';
 import { authFixture, credentials, deferred, proof, rotated, user } from '../../test/auth-fixtures';
 
+// Keep route/auth request-count regressions scoped to authentication. The
+// applications suite separately exercises the real coordinated list transport.
+vi.mock('../../lib/applications/api', async importOriginal => ({
+  ...await importOriginal<typeof import('../../lib/applications/api')>(),
+  createApplicationsApi: () => ({ list: vi.fn().mockResolvedValue({ items: [], nextCursor: null }), create: vi.fn() })
+}));
+
 const fixtures: ReturnType<typeof authFixture>[] = [];
 function fixture(options: Parameters<typeof authFixture>[0] = {}) {
   const result = authFixture(options); fixtures.push(result); return result;

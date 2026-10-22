@@ -9,6 +9,7 @@ import { createSessionService } from './modules/auth/sessions.js';
 import { startSessionCleanup } from './modules/auth/cleanup.js';
 import { createPasswordService } from './modules/auth/passwords.js';
 import { createAuthenticationService } from './modules/auth/authentication.js';
+import { createApplicationService } from './modules/applications/service.js';
 
 async function main() {
   const envPath = fileURLToPath(new URL('../.env', import.meta.url));
@@ -20,7 +21,8 @@ async function main() {
     const sessions = createSessionService(database.client);
     const passwords = await createPasswordService();
     const authentication = createAuthenticationService(database.client, passwords);
-    const app = createApp(env, { config, sessions, authentication });
+    const applications = createApplicationService(database.client, { now: () => new Date(), timeZone: env.APP_TIMEZONE });
+    const app = createApp(env, { config, sessions, authentication }, { applications });
     const stopCleanup = startSessionCleanup(sessions);
     const server = app.listen(env.PORT, env.HOST, () => {
       console.info(`ApplyFlow API listening at http://${env.HOST}:${env.PORT}`);

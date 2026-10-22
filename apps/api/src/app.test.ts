@@ -43,7 +43,7 @@ describe('fixed-path compiled frontend serving (filesystem and authentication mo
   });
   it('preserves API JSON 404 and health precedence, asset misses, and non-navigation behavior', async () => {
     const { app, sendFile } = fixture('test', true);
-    for (const path of ['/api/v1/missing', '/assets/missing', '/missing.js']) {
+    for (const path of ['/api/v1/missing', '/api/applications', '/assets/missing', '/missing.js']) {
       await request(app).get(path).set('Accept', 'text/html').expect(404).expect('Content-Type', /json/);
     }
     await request(app).get('/app').set('Accept', 'application/json').expect(404);

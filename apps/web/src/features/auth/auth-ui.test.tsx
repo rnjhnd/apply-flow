@@ -10,6 +10,13 @@ import { AuthProvider } from './auth-provider';
 import { AuthRoute } from './auth-route';
 import { useAuthAdmission } from './auth-admission';
 
+// Preserve exact authentication-only reconciliation counts. The applications
+// integration suite covers the real gateway, including its GET session checks.
+vi.mock('../../lib/applications/api', async importOriginal => ({
+  ...await importOriginal<typeof import('../../lib/applications/api')>(),
+  createApplicationsApi: () => ({ list: vi.fn().mockResolvedValue({ items: [], nextCursor: null }), create: vi.fn() })
+}));
+
 const fixtures: ReturnType<typeof authFixture>[] = [];
 function fixture(options: Parameters<typeof authFixture>[0] = {}) {
   const setup = authFixture(options); fixtures.push(setup); return setup;
@@ -41,7 +48,14 @@ function anonymous(setup: ReturnType<typeof fixture>) {
   setup.api.me.mockRejectedValue(new AuthFailure('http', 401, 'UNAUTHENTICATED'));
   setup.api.csrf.mockResolvedValue({ csrfToken: rotated, registrationEnabled: true });
 }
-beforeEach(() => { vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible'); });
+beforeEach(() => {
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  // Authentication tests isolate the newly mounted list's transport; feature
+  // errors are exercised in the applications tests, not as unrelated alerts here.
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async () => new Response(JSON.stringify({ items: [], nextCursor: null }), {
+    status: 200, headers: { 'Content-Type': 'application/json' }
+  })));
+});
 afterEach(() => { for (const setup of fixtures) setup.store.dispose(); fixtures.length = 0; });
 
 describe('native authentication forms and credential lifetime', () => {
@@ -330,12 +344,12 @@ describe('minimal workspace and conservative logout', () => {
     expect(screen.getByLabelText('Current path').textContent).toBe('/missing'); expect(setup.api.csrf).toHaveBeenCalledTimes(2);
     expect(setup.held()).toBe(0); expect(setup.subscriptions()).toBe(0);
   });
-  it('shows only safe verified user information and honest future-work messaging', async () => {
+  it('shows only safe verified user information and the application workspace', async () => {
     start('/app', fixture({ authenticated: true }));
     expect(await screen.findByRole('heading', { name: 'Your workspace' })).toBeTruthy();
     expect(screen.getByText(user.email)).toBeTruthy(); expect(document.body.textContent).not.toContain(user.id);
     expect(document.body.textContent).not.toContain(proof); expect(document.body.textContent).not.toContain(rotated);
-    expect(screen.getByText(/Application tracking will arrive in a later milestone/)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Add an application' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Sign out' })).toBeTruthy();
   });
   it('gates workspace while logout and anonymous confirmation are pending, prevents duplicates and redirects only on proof', async () => {

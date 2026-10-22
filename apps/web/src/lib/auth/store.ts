@@ -35,14 +35,14 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
       try { listener(); } catch { /* An observer must not release an authentication lock. */ }
     }
   }
-  function invalidate() {
+  function invalidate(rejection?: AuthFailure) {
     generation++;
     csrfToken = null;
     verifiedGeneration = null;
     // Missing proof preserves the need for revalidation even when a pending operation or cooldown blocks it.
     // Do not claim initialization is running: recovery may require an explicit action after admission resumes.
-    const error = state.retryAt !== null && state.retryAt > now()
-      ? new AuthFailure('cooldown', 429, 'RATE_LIMITED', state.retryAt) : new AuthFailure('stale');
+    const error = rejection ?? (state.retryAt !== null && state.retryAt > now()
+      ? new AuthFailure('cooldown', 429, 'RATE_LIMITED', state.retryAt) : new AuthFailure('stale'));
     update({ status: state.outcomeUncertain ? 'uncertain' : 'unavailable', user: null, registrationEnabled: null,
       verifiedReadId: null, error });
   }
@@ -185,6 +185,60 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
       }
     });
   }
+  // Only the feature transport consumes this callback. Proof never enters public
+  // snapshots or component state. Feature requests cannot rotate the cookie and
+  // its failure must not create registration/authentication mutation uncertainty.
+  async function authenticatedRequest<T>(send: (proof: string) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (pending) throw new AuthFailure('busy');
+    usable();
+    const intendedUser = state.user?.id;
+    const intendedProof = csrfToken;
+    const epoch = generation;
+    if (state.status !== 'authenticated' || state.verifiedReadId === null || !intendedUser || !intendedProof) throw new AuthFailure('stale');
+    function authority() {
+      usable();
+      if (signal?.aborted || epoch !== generation || state.status !== 'authenticated'
+        || state.user?.id !== intendedUser || csrfToken !== intendedProof) throw new AuthFailure('stale');
+    }
+    authority();
+    let result: { value: T } | undefined;
+    let rejected = false;
+    let reason: unknown;
+    const completed = await start(async () => {
+      // Abandoned reads waiting for another tab's lock must not dispatch work.
+      authority();
+      try { await synchronize(); usable(); }
+      catch (error) {
+        const failure = error instanceof AuthFailure ? error : new AuthFailure('network');
+        unavailable(failure, 'read'); throw failure;
+      }
+      authority();
+      try { result = { value: await send(csrfToken!) }; }
+      catch (error) {
+        rejected = true; reason = error;
+        const status = error instanceof Error && 'status' in error ? error.status : undefined;
+        if (status === 401 || status === 403) {
+          // Publish rejection together with loss of proof so feature consumers
+          // quarantine rows before reconciliation can complete or fail.
+          invalidate(new AuthFailure('http', status, status === 401 ? 'UNAUTHENTICATED' : 'REQUEST_REJECTED'));
+          try { await synchronize(); }
+          catch (recovery) { unavailable(recovery instanceof AuthFailure ? recovery : new AuthFailure('network'), 'read'); }
+        }
+      }
+      if (disposed || suspended || signal?.aborted || epoch !== generation || state.user?.id !== intendedUser) {
+        result = undefined;
+        if (!rejected) { rejected = true; reason = new AuthFailure('stale'); }
+      }
+    });
+    if (rejected) throw reason;
+    // The lock-release continuation and synchronous subscribers may invalidate
+    // an otherwise successful transport result. A receipt is not a capability
+    // detached from the current user, proof, generation and operation admission.
+    authority();
+    if (state.busy || state.verifiedReadId === null || state.verifiedReadId !== completed.verifiedReadId) throw new AuthFailure('stale');
+    if (!result) throw new AuthFailure('stale');
+    return result.value;
+  }
   const unsubscribe = coordination?.subscribe((event) => {
     if (disposed) return;
     if (event === 'suspend') suspended = true;
@@ -199,6 +253,7 @@ export function createAuthStore(options: { api: AuthApi; coordination: AuthCoord
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     bootstrap,
     revalidate: () => bootstrap(true),
+    authenticatedRequest,
     login: (input: LoginRequest) => mutation('login', input),
     register: (input: RegisterRequest) => mutation('register', input),
     logout: () => mutation('logout'),

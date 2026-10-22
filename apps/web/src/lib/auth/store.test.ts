@@ -48,6 +48,76 @@ function browser() {
 }
 afterEach(() => { vi.useRealTimers(); });
 
+describe('private authenticated feature request gateway', () => {
+  it.each(['invalidate', 'suspend', 'dispose'] as const)('rejects %s at the coordinator release boundary', async event => {
+    const shared = browser(); const channel = shared.tab(); const other = shared.tab();
+    const exclusive = channel.exclusive.bind(channel);
+    const subscribe = channel.subscribe.bind(channel);
+    let notify: ((event: AuthCoordinationEvent) => void) | undefined;
+    channel.subscribe = listener => { notify = listener; return subscribe(listener); };
+    let atRelease: (() => void) | undefined;
+    channel.exclusive = work => exclusive(async () => { const result = await work(); atRelease?.(); return result; });
+    const api = transport(); api.me.mockResolvedValue({ user });
+    const store = createAuthStore({ api, coordination: channel }); await store.bootstrap();
+    atRelease = () => { atRelease = undefined; if (event === 'dispose') store.dispose(); else if (event === 'suspend') notify?.('suspend'); else other.publish(); };
+    const send = vi.fn().mockResolvedValue('saved');
+    try {
+      await expect(store.authenticatedRequest(send)).rejects.toMatchObject({ kind: expect.stringMatching(/stale|coordination/) });
+      expect(send).toHaveBeenCalledOnce(); expect(shared.held()).toBe(0); expect(store.getSnapshot().verifiedReadId).toBeNull();
+    } finally { store.dispose(); other.close(); }
+  });
+  async function authenticated() {
+    const api = transport(); api.me.mockResolvedValue({ user }); const shared = browser();
+    const channel = shared.tab(); const store = createAuthStore({ api, coordination: channel });
+    await store.bootstrap(); return { api, store, shared, channel };
+  }
+  it('passes proof only to the transport after verification, holds the lock and does not broadcast cookie changes', async () => {
+    const f = await authenticated(); const gate = deferred<string>(); const send = vi.fn(() => gate.promise);
+    const operation = f.store.authenticatedRequest(send); expect(f.store.getSnapshot().busy).toBe(true);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith(proof));
+    expect(f.shared.held()).toBe(1); expect(JSON.stringify(f.store.getSnapshot())).not.toContain(proof);
+    gate.resolve('saved'); expect(await operation).toBe('saved'); expect(f.shared.held()).toBe(0);
+    expect(f.shared.messages).toEqual([]); expect(f.store.getSnapshot().verifiedReadId).toBe(2); f.store.dispose();
+  });
+  it('rejects duplicates and concurrent logout without dispatch or early lock release', async () => {
+    const f = await authenticated(); const gate = deferred<void>(); const send = vi.fn(() => gate.promise);
+    const operation = f.store.authenticatedRequest(send);
+    await expect(f.store.authenticatedRequest(send)).rejects.toMatchObject({ kind: 'busy' });
+    await expect(f.store.logout()).rejects.toMatchObject({ kind: 'busy' });
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce()); gate.resolve(); await operation;
+    expect(f.api.logout).not.toHaveBeenCalled(); f.store.dispose();
+  });
+  it('does not dispatch when the session is replaced while waiting for the lock', async () => {
+    const f = await authenticated(); f.api.me.mockResolvedValue({ user: { ...user, id: 'bb08d55f-7869-46d3-a2af-f4676ac7019d' } });
+    const send = vi.fn(); await expect(f.store.authenticatedRequest(send)).rejects.toMatchObject({ kind: 'stale' });
+    expect(send).not.toHaveBeenCalled(); f.store.dispose();
+  });
+  it('does not dispatch after failed authoritative verification', async () => {
+    const f = await authenticated(); f.api.me.mockRejectedValueOnce(new AuthFailure('network'));
+    const send = vi.fn(); await expect(f.store.authenticatedRequest(send)).rejects.toMatchObject({ kind: 'network' });
+    expect(send).not.toHaveBeenCalled(); expect(f.store.getSnapshot()).toMatchObject({ status: 'uncertain', outcomeUncertain: false, verifiedReadId: null }); f.store.dispose();
+  });
+  it.each([false, true])('settles feature exceptions without replay or registration ambiguity (synchronous=%s)', async synchronous => {
+    const f = await authenticated(); const failure = new Error('Transport failure');
+    const send = vi.fn(() => { if (synchronous) throw failure; return Promise.reject(failure); });
+    await expect(f.store.authenticatedRequest(send)).rejects.toBe(failure);
+    expect(send).toHaveBeenCalledOnce(); expect(f.store.getSnapshot()).toMatchObject({ status: 'authenticated', busy: false, outcomeUncertain: false }); f.store.dispose();
+  });
+  it('discards a successful create result invalidated during the pending request', async () => {
+    const f = await authenticated(); const other = f.shared.tab(); const gate = deferred<string>();
+    const send = vi.fn(() => gate.promise); const operation = f.store.authenticatedRequest(send);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce()); other.publish(); gate.resolve('old result');
+    await expect(operation).rejects.toMatchObject({ kind: 'stale' });
+    expect(f.store.getSnapshot().verifiedReadId).toBeNull(); expect(f.store.getSnapshot().busy).toBe(false); f.store.dispose(); other.close();
+  });
+  it('reconciles rejection once without replaying feature work or marking registration ambiguous', async () => {
+    const f = await authenticated(); const send = vi.fn().mockRejectedValue(Object.assign(new Error(), { status: 403 }));
+    await expect(f.store.authenticatedRequest(send)).rejects.toMatchObject({ status: 403 });
+    expect(send).toHaveBeenCalledOnce(); expect(f.api.csrf).toHaveBeenCalledTimes(3);
+    expect(f.store.getSnapshot()).toMatchObject({ status: 'authenticated', verifiedReadId: 2, outcomeUncertain: false }); f.store.dispose();
+  });
+});
+
 describe('read-only versus mutation uncertainty', () => {
   it.each(['csrf', 'me'] as const)('recovers a failed %s read without inventing mutation ambiguity or a receipt', async (endpoint) => {
     const api = transport(); api[endpoint].mockRejectedValueOnce(new AuthFailure('network'));
