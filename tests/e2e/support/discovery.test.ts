@@ -92,16 +92,19 @@ describe('offline Playwright configuration/discovery', () => {
     expect(isPreflightEntrypoint(process.argv[1])).toBe(false);
     expect(unavailable).not.toHaveBeenCalled();
   });
-  it('B3 commands remain disabled with valid environment and arbitrary approval/argument flags', async () => {
+  it('inspection rejects arguments before ports; cycle remains disabled despite approval flags', async () => {
     vi.stubEnv('NODE_ENV', 'test');
     vi.stubEnv('TEST_DATABASE_URL', 'postgresql://applyflow_test:offline-sentinel@127.0.0.1:5433/applyflow_test');
     vi.stubEnv('APPLYFLOW_FIXTURES_APPROVED', 'true');
     const { runFixtureInspection } = await import('./fixture-preflight.js');
     const { runFixtureCycle } = await import('./fixture-cycle.js');
     const output = vi.fn();
-    expect(Reflect.apply(runFixtureInspection, undefined, [output, '--approve', '--sql=DELETE'])).toBe(1);
+    expect(await runFixtureInspection({ environment: process.env, args: ['--approve', '--sql=DELETE'], platform: 'win32',
+      signals: { on: unavailable, off: unavailable }, readMigration: unavailable,
+      readOnly: async () => unavailable(), prisma: async () => unavailable(), output })).toBe(1);
+    expect(output).toHaveBeenCalledExactlyOnceWith('APPLYFLOW_FIXTURE_INSPECTION ARGUMENTS: This command accepts no arguments.');
+    output.mockClear();
     expect(Reflect.apply(runFixtureCycle, undefined, [output, '--approve', '--base-url=http://other'])).toBe(1);
-    expect(runFixtureInspection(() => { throw new Error('private reporter sentinel'); })).toBe(1);
     expect(runFixtureCycle(() => { throw new Error('private reporter sentinel'); })).toBe(1);
     expect(output.mock.calls.every(([line]) => String(line).startsWith('APPLYFLOW_FIXTURES DISABLED:'))).toBe(true);
     expect(unavailable).not.toHaveBeenCalled();
@@ -127,7 +130,7 @@ describe('offline Playwright configuration/discovery', () => {
     expect(unavailable).not.toHaveBeenCalled();
   });
   it.each(['fixture-preflight', 'fixture-cycle', 'fixture-child'] as const)(
-    'keeps the %s direct-entry branch disabled under simulated argv without spawning Node', async (entry) => {
+    'keeps inspection import inert and other %s entries disabled under spoofed argv without spawning Node', async (entry) => {
       const argv = process.argv; const code = process.exitCode;
       const output = vi.spyOn(fs, 'writeSync').mockImplementation(() => 0);
       syncBuiltinESMExports();
@@ -139,8 +142,12 @@ describe('offline Playwright configuration/discovery', () => {
         if (entry === 'fixture-preflight') await import('./fixture-preflight.js');
         else if (entry === 'fixture-cycle') await import('./fixture-cycle.js');
         else await import('./fixture-child.js');
-        expect(process.exitCode).toBe(1);
-        expect(output).toHaveBeenCalledExactlyOnceWith(2, expect.stringContaining('APPLYFLOW_FIXTURES DISABLED:'));
+        if (entry === 'fixture-preflight') {
+          expect(process.exitCode).toBe(code); expect(output).not.toHaveBeenCalled();
+        } else {
+          expect(process.exitCode).toBe(1);
+          expect(output).toHaveBeenCalledExactlyOnceWith(2, expect.stringContaining('APPLYFLOW_FIXTURES DISABLED:'));
+        }
         expect(unavailable).not.toHaveBeenCalled();
       } finally {
         process.argv = argv; process.exitCode = code; output.mockRestore(); syncBuiltinESMExports();

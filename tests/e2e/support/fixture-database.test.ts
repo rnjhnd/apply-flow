@@ -7,7 +7,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import type { DatabaseEnvironment } from '../../../apps/api/src/config/database.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Prisma } from '../../../apps/api/src/generated/prisma/client.ts';
-import { openFixtureDatabase, fixtureBackendSql, type FixtureDriver, type FixtureMode } from './fixture-database.js';
+import { openFixtureDatabase, inspectFixtureDatabase, fixtureBackendSql, type FixtureDriver, type FixtureMode } from './fixture-database.js';
 import { catalogSql, readOnlyCatalogSql } from './catalog.js';
 import { cleanupSql } from './cleanup.js';
 import { preflightControlSql } from './read-only-database.js';
@@ -15,7 +15,9 @@ import { env, sql, inspection, deferred, finalizationFixture, owner, userId, ema
 
 function fixture(mode: FixtureMode = 'inspect-only') {
   const socket = Object.assign(new EventEmitter(), { remoteAddress: '127.0.0.1', remotePort: 5433, destroyed: false, closed: false,
-    destroy() { this.destroyed = true; this.closed = true; return this; } });
+    destroy(this: EventEmitter & { destroyed: boolean; closed: boolean }) {
+      if (!this.destroyed) { this.destroyed = true; this.closed = true; this.emit('close', false); } return this;
+    } });
   const identity = { database: 'applyflow_test', username: 'applyflow_test', sessionUser: 'applyflow_test', pid: 123 };
   const checked = inspection(); const schema = checked.schema as typeof import('./schema.js').expectedSchema;
   let inReadOnly = true;
@@ -61,6 +63,113 @@ function fixture(mode: FixtureMode = 'inspect-only') {
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe('B3 private physical Prisma binding (injected, no pg/socket construction)', () => {
+  it('rejects the audited queued error-before-close ordering before issuing a receipt, ten times', async () => {
+    const results: string[] = [];
+    for (let repetition = 0; repetition < 10; repetition++) {
+      const f = fixture(); const delivered = deferred();
+      f.pool.end.mockImplementation(async () => {
+        f.socket.destroyed = true; f.socket.closed = true;
+        process.nextTick(() => {
+          f.socket.emit('error', new Error('private-queued-error'));
+          f.socket.emit('close', true); f.physical.emit('end'); delivered.resolve();
+        });
+      });
+      results.push(await inspectFixtureDatabase(env, sql, f.driver, f.controller.signal).then(() => 'receipt', () => 'failed'));
+      await delivered.promise;
+    }
+    expect(results).toEqual(Array<string>(10).fill('failed'));
+  });
+  it('withholds the receipt after pool end and a true closed flag until close is observed', async () => {
+    const f = fixture(); const ended = deferred(); let completed = false;
+    f.pool.end.mockImplementation(async () => { f.socket.destroyed = true; f.socket.closed = true; ended.resolve(); });
+    const inspecting = inspectFixtureDatabase(env, sql, f.driver, f.controller.signal).then((receipt) => { completed = true; return receipt; });
+    await ended.promise; await Promise.resolve(); await Promise.resolve();
+    expect(completed).toBe(false); expect(f.socket.listenerCount('close')).toBe(1);
+    f.socket.emit('close', false);
+    expect(await inspecting).toEqual({ outcome: 'passed', readOnly: true, closed: true });
+    expect(f.prisma.$disconnect).toHaveBeenCalledOnce(); expect(f.pool.end).toHaveBeenCalledOnce();
+  });
+  it('still requires pool end fulfillment when close has already been observed', async () => {
+    const f = fixture(); const closed = deferred(); const end = deferred(); let completed = false;
+    f.pool.end.mockImplementation(async () => { f.socket.destroy(); f.physical.emit('end'); closed.resolve(); await end.promise; });
+    const inspecting = inspectFixtureDatabase(env, sql, f.driver, f.controller.signal).then((receipt) => { completed = true; return receipt; });
+    await closed.promise; await Promise.resolve(); expect(completed).toBe(false);
+    end.resolve(); expect((await inspecting).closed).toBe(true);
+  });
+  it('bounds missing close evidence within the original shared shutdown deadline', async () => {
+    vi.useFakeTimers(); const f = fixture(); const ended = deferred(); let completed = false;
+    const destroy = vi.spyOn(f.socket, 'destroy');
+    f.pool.end.mockImplementation(async () => { f.socket.destroyed = true; f.socket.closed = true; ended.resolve(); });
+    const inspecting = inspectFixtureDatabase(env, sql, f.driver, f.controller.signal, f.review);
+    const rejected = expect(inspecting.finally(() => { completed = true; })).rejects.toThrow('closure requires review');
+    await ended.promise; await vi.advanceTimersByTimeAsync(1999); expect(completed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1); await rejected;
+    expect(destroy).toHaveBeenCalledOnce(); expect(f.pool.end).toHaveBeenCalledOnce();
+    f.socket.emit('close', false); await vi.advanceTimersByTimeAsync(0);
+    expect(f.review).toHaveBeenCalledOnce();
+  });
+  it.each(['had-error', 'duplicate', 'flag-missing', 'premature'] as const)('rejects abnormal observed closure: %s', async (kind) => {
+    const f = fixture();
+    if (kind === 'premature') {
+      const connect = f.prisma.$connect.getMockImplementation()!;
+      f.prisma.$connect.mockImplementation(async () => { await connect(); f.socket.destroy(); });
+    } else {
+      f.pool.end.mockImplementation(async () => {
+        if (kind !== 'flag-missing') { f.socket.destroyed = true; f.socket.closed = true; }
+        f.socket.emit('close', kind === 'had-error');
+        if (kind === 'duplicate') f.socket.emit('close', false);
+        f.physical.emit('end');
+      });
+    }
+    await expect(inspectFixtureDatabase(env, sql, f.driver, f.controller.signal)).rejects.toThrow('review');
+    expect(f.pool.end).toHaveBeenCalledOnce();
+  });
+  it('registers the close observer before connect work and rejects partial registration failure', async () => {
+    const f = fixture(); const on = f.socket.on.bind(f.socket);
+    vi.spyOn(f.socket, 'on').mockImplementation((event, handler) => {
+      const result = on(event, handler);
+      if (event === 'close') throw new Error('private-close-registration');
+      return result;
+    });
+    await expect(inspectFixtureDatabase(env, sql, f.driver, f.controller.signal)).rejects.toThrow('review');
+    expect(f.wire).not.toHaveBeenCalled(); expect(f.pool.end).toHaveBeenCalledOnce();
+  });
+  it('returns only a frozen closed receipt after exactly one initial inspection', async () => {
+    const f = fixture();
+    const receipt = await inspectFixtureDatabase(env, sql, f.driver, f.controller.signal);
+    expect(receipt).toEqual({ outcome: 'passed', readOnly: true, closed: true });
+    expect(Object.isFrozen(receipt)).toBe(true);
+    expect(f.prisma.$transaction).toHaveBeenCalledOnce();
+    expect(f.wire.mock.calls.filter(([text]) => text === 'ROLLBACK')).toHaveLength(1);
+    expect(f.prisma.$disconnect).toHaveBeenCalledOnce(); expect(f.pool.end).toHaveBeenCalledOnce();
+  });
+  it('does not certify inspection when cancellation arrives during owned closure', async () => {
+    const f = fixture();
+    f.prisma.$disconnect.mockImplementation(async () => { f.controller.abort(); });
+    await expect(inspectFixtureDatabase(env, sql, f.driver, f.controller.signal)).rejects.toThrow('review');
+    expect(f.pool.end).toHaveBeenCalledOnce();
+  });
+  it('does not certify inspection when the owned driver emits an error during closure', async () => {
+    const f = fixture();
+    f.prisma.$disconnect.mockImplementation(async () => { f.pool.emit('error', new Error('private-sentinel')); });
+    await expect(inspectFixtureDatabase(env, sql, f.driver, f.controller.signal)).rejects.toThrow('review');
+  });
+  it.each(['pool', 'socket'] as const)('notifies the shared latch on %s failure after the frozen receipt exists', async (resource) => {
+    const f = fixture(); const failure = vi.fn();
+    const receipt = await inspectFixtureDatabase(env, sql, f.driver, f.controller.signal, failure);
+    expect(receipt).toEqual({ outcome: 'passed', readOnly: true, closed: true }); expect(failure).not.toHaveBeenCalled();
+    f[resource].emit('error', new Error('private-sentinel')); f[resource].emit('error', new Error('another-private-sentinel'));
+    expect(failure).toHaveBeenCalledOnce(); expect(Object.isFrozen(receipt)).toBe(true);
+    // This receipt proves inspection/closure only, not later command success.
+    expect(Object.keys(receipt).sort()).toEqual(['closed', 'outcome', 'readOnly']);
+  });
+  it('sanitizes a throwing shared failure callback and still refuses completion', async () => {
+    const f = fixture();
+    f.prisma.$disconnect.mockImplementation(async () => { f.pool.emit('error', new Error('private-driver-sentinel')); });
+    await expect(inspectFixtureDatabase(env, sql, f.driver, f.controller.signal, () => { throw new Error('private-observer-sentinel'); }))
+      .rejects.toThrow('Fixture inspection requires review.');
+    expect(f.pool.end).toHaveBeenCalledOnce();
+  });
   it.each(['inspect-only', 'fixture-cycle'] as const)('requires actual backend/socket and confirmed read-only rollback in %s mode', async (mode) => {
     const f = fixture(mode); const db = await f.open(); await db.inspect();
     expect(f.wire.mock.calls.filter(([text]) => text === 'ROLLBACK')).toHaveLength(2);
@@ -143,7 +252,7 @@ describe('B3 private physical Prisma binding (injected, no pg/socket constructio
     const destroy = vi.spyOn(f.socket, 'destroy').mockImplementation(() => { throw new Error('private-destruction-sentinel'); });
     f.pool.end.mockImplementation(async () => { f.physical.emit('end'); });
     const opening = f.open(); const rejected = expect(opening).rejects.toThrow('Fixture database initialization requires review.');
-    await entered.promise; await vi.advanceTimersByTimeAsync(5000); await rejected;
+    await entered.promise; await vi.advanceTimersByTimeAsync(7000); await rejected;
     expect(destroy).toHaveBeenCalledOnce(); expect(f.review).toHaveBeenCalledOnce();
     f.controller.abort(); f.controller.abort(); held.resolve(); await vi.advanceTimersByTimeAsync(0);
     expect(f.prisma.$connect).toHaveBeenCalledOnce(); expect(f.pool.end).toHaveBeenCalledOnce(); expect(destroy).toHaveBeenCalledOnce();
@@ -163,7 +272,8 @@ describe('B3 private physical Prisma binding (injected, no pg/socket constructio
     f.controller.abort(); f.controller.abort(); held.resolve({ command: 'SELECT', rows: [{ others: 0 }] });
     await vi.advanceTimersByTimeAsync(0);
     await expect(db.inspect()).rejects.toThrow('authority');
-    await expect(db.close()).rejects.toThrow('Fixture database closure requires review.');
+    const closing = expect(db.close()).rejects.toThrow('Fixture database closure requires review.');
+    await vi.advanceTimersByTimeAsync(2000); await closing;
     expect(db.isClosed()).toBe(false); expect(destroy).toHaveBeenCalledOnce(); expect(f.review).toHaveBeenCalledOnce();
     expect(f.wire.mock.calls.some(([text]) => text === 'COMMIT')).toBe(false);
   });

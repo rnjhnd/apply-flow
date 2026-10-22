@@ -36,6 +36,17 @@ export async function installedFixtureDriver(mode: FixtureMode): Promise<Fixture
   if (mode === 'fixture-cycle') throw new Error('B3C2 installed fixture driver is disabled.');
   throw new Error('Installed fixture driver is disabled.');
 }
+// Mandatory injected ports, with no installed default. Opening performs the one
+// initial inspection. Never expose the wider fixture facade or inspect twice.
+export async function inspectFixtureDatabase(source: DatabaseEnvironment, migration: Uint8Array,
+  driver: FixtureDriver, signal: AbortSignal, onFailure: () => void = () => undefined): Promise<Readonly<{ outcome: 'passed'; readOnly: true; closed: true }>> {
+  let reviewed = false;
+  // The caller's monotonic latch must outlive this frozen completion receipt.
+  const database = await openFixtureDatabase(source, migration, 'inspect-only', driver, () => { reviewed = true; onFailure(); }, signal);
+  await database.close();
+  if (reviewed || signal.aborted || !database.isClosed()) throw new Error('Fixture inspection requires review.');
+  return Object.freeze({ outcome: 'passed', readOnly: true, closed: true });
+}
 export async function openFixtureDatabase(source: DatabaseEnvironment, migration: Uint8Array, mode: FixtureMode,
   driver: FixtureDriver, review: () => void, signal?: AbortSignal) {
   const target = admitEnvironment(source);
@@ -48,7 +59,14 @@ export async function openFixtureDatabase(source: DatabaseEnvironment, migration
   let pid: number | undefined; let physicalAllocations = 0; let closePromise: Promise<void> | undefined;
   let rollbackConfirmations = 0;
   let destructionRequested = false;
+  let closeObserved = false;
+  let resolveSocketClose!: () => void;
+  const socketClose = new Promise<void>((resolve) => { resolveSocketClose = resolve; });
   const fail = () => { if (!failed) { failed = true; try { review(); } catch { /* Never expose reporter/storage failures. */ } } };
+  const observeClose = (hadError?: boolean) => {
+    if (closeObserved || hadError === true || !closing) fail();
+    closeObserved = true; resolveSocketClose();
+  };
   const abort = () => fail();
   function destroyOwned() {
     if (!socket || destructionRequested) return;
@@ -98,8 +116,13 @@ export async function openFixtureDatabase(source: DatabaseEnvironment, migration
     closePromise ??= (async () => {
       try {
         if (busy) throw new Error();
-        await bounded((async () => { await client?.$disconnect(); await pool?.end(); })(), 2000);
-        if (socket && socket.closed !== true) throw new Error();
+        await bounded((async () => {
+          await client?.$disconnect(); await pool?.end();
+          // pg pool completion and Socket.closed may precede queued error/close
+          // delivery. Require the owned close event within the same budget.
+          if (socket && !closeObserved) await socketClose;
+        })(), 2000);
+        if (socket && (!closeObserved || socket.closed !== true)) throw new Error();
         closed = true;
       } catch { fail(); destroyOwned(); throw new Error('Fixture database closure requires review.'); }
       finally { signal?.removeEventListener('abort', abort); }
@@ -148,7 +171,7 @@ export async function openFixtureDatabase(source: DatabaseEnvironment, migration
       options: `-c default_transaction_read_only=${mode === 'inspect-only' ? 'on' : 'off'} -c search_path=pg_catalog,public`,
       stream: () => {
         assert(); if (physicalAllocations++ !== 0) { fail(); throw new Error('Fixture reconnect rejected.'); }
-        socket = driver.socket(); socket.on('error', fail); return socket;
+        socket = driver.socket(); socket.on('error', fail); socket.on('close', observeClose); return socket;
       },
       onConnect: async (incoming) => {
         assert(); if (bound) { fail(); throw new Error('Fixture client replacement rejected.'); }
