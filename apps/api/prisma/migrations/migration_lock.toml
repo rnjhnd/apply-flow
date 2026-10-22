@@ -1,0 +1,2 @@
+# Keep the provider consistent with the reviewed migration history.
+provider = "postgresql"

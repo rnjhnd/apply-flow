@@ -1,0 +1,45 @@
+name: applyflow
+
+services:
+  postgres-dev:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: applyflow_dev
+      POSTGRES_USER: applyflow_dev
+      POSTGRES_PASSWORD: ${POSTGRES_DEV_PASSWORD:?Initialize the ignored API environment first}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U applyflow_dev -d applyflow_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  postgres-test:
+    image: postgres:17-bookworm
+    profiles: [test]
+    environment:
+      POSTGRES_DB: applyflow_test
+      POSTGRES_USER: applyflow_test
+      POSTGRES_PASSWORD: ${POSTGRES_TEST_PASSWORD:?Initialize the ignored API environment first}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U applyflow_test -d applyflow_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  postgres_dev_data:
+  postgres_test_data:
