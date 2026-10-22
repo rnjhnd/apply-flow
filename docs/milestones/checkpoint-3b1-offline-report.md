@@ -2,9 +2,15 @@
 
 ## Result and approval boundary
 
-**Offline implementation verified. Migration 0002_job_applications: REVIEW_PENDING.**
+**Offline implementation verified. Exact migration source: APPROVED. SQL execution: NOT AUTHORIZED.**
 
-Baseline inspected: branch `feat/job-applications`, HEAD
+The source-approval addendum at the end records the current decision. References
+to REVIEW_PENDING in the original implementation/correction evidence below are
+historical; they do not describe the current manifest. Neither source approval
+nor the passing offline tests authorize a connection, integration suite or SQL
+execution against either database.
+
+Initial implementation baseline inspected: branch `feat/job-applications`, HEAD
 `f1ddf9c17b8976efe050618d2969dee58e945217`, initially clean working tree and
 empty staging area. The accepted authentication implementation and Stage 2D
 user-confirmed 4/4 manual results remain historical evidence, not tests rerun here.
@@ -98,7 +104,7 @@ added in this checkpoint.
 | Migration | SHA-256 | Approval |
 | --- | --- | --- |
 | 0001_init_auth | `98fab302c1f9d6a053d549bdbb9aec2bece4e24322fb1292948647ed693ac840` | Previously approved; exact bytes preserved |
-| 0002_job_applications | `74e056f699c2781c01f12d3195ed119074d5b0d4d04fef979c185e17d775a333` | **REVIEW_PENDING** |
+| 0002_job_applications | `74e056f699c2781c01f12d3195ed119074d5b0d4d04fef979c185e17d775a333` | **Source APPROVED; SQL execution not authorized** |
 
 Frozen authentication schema SHA-256:
 `043b3e43163c7aa05f09be3d3a3dabd5e9698418bca265c40bad9fe022dd1129`.
@@ -296,8 +302,9 @@ verification is claimed.
 
 ## Remaining limitations and next approvals
 
-- The SQL/digest and changing its approval state require separate review. Applying
-  to test and applying to development require separate explicit authorization.
+- The exact SQL/digest has now received source approval as recorded below. Applying
+  to test and applying to development still require separate explicit authorization.
+  Different SQL or a different digest requires a new review and source approval.
 - No live constraint, enum, transaction rollback, FK restriction, DDL locking or
   concurrency behavior is established by static SQL checks or injected tests.
 - No database fingerprint was taken, because all database access was forbidden.
@@ -319,7 +326,7 @@ verification is claimed.
 - No create/list endpoint, frontend, status-history, archive/delete feature,
   browser scenario, production verification or Stage 3B.2 work occurred.
 
-## Final Git inventory
+## Original implementation Git inventory (historical)
 
 ```text
  M apps/api/prisma/migrations/0001_init_auth/migration.sql
@@ -343,6 +350,92 @@ verification is claimed.
 ?? packages/contracts/src/applications.ts
 ```
 
-The initial migration entry reflects the approved LF working-file restoration,
-not changed SQL. Branch and HEAD remain unchanged. There are eight tracked content
-changes plus that restoration, ten new files, and nothing staged or committed.
+At the original report's completion, the initial migration entry reflected the
+approved LF working-file restoration, not changed SQL. There were eight tracked
+content changes plus that restoration, ten new files, and nothing staged or
+committed. That work has since been committed at the baseline below.
+
+## Exact migration source approval - current status
+
+User authorization is limited to the reviewed source manifest, not execution.
+Baseline independently confirmed before edits: `feat/job-applications`, HEAD
+`29f2dd7460c6a65914c8e5594135c0183d2c50e6`, clean working tree and empty staging
+area. Both working SQL files matched their reviewed SHA-256 values before edits
+and again after verification:
+
+- `0001_init_auth`: `98fab302c1f9d6a053d549bdbb9aec2bece4e24322fb1292948647ed693ac840`.
+- `0002_job_applications`: `74e056f699c2781c01f12d3195ed119074d5b0d4d04fef979c185e17d775a333`.
+
+The new SQL was reread in full. It contains only BEGIN/COMMIT, creation of the
+seven-value ApplicationStatus enum, JobApplication table and primary key, ownership
+ordering index, restrictive User FK and named status/applicationDate CHECK. It
+does not alter User/Session definitions or contain DML, backfills, resets, drops
+or permission changes. No bytes, line endings or checksum of either migration
+changed. The SQL block earlier in this report still exactly matches the file.
+
+Only the second entry's approval status changed from REVIEW_PENDING to APPROVED
+in production tooling. Its exact name and digest, the initial migration entry,
+all validation functions and all deployment/target logic are unchanged. A comment
+now explicitly distinguishes source approval from target-specific execution
+authorization. The manifest and its entries remain frozen.
+
+Exact files changed in this source-approval pass:
+
+- `apps/api/scripts/migration-policy.ts`: exact second-entry status/comment only.
+- `apps/api/scripts/migration-policy.test.ts`: current approved-manifest assertions,
+  explicit pending-state fixtures and injected filesystem negative checks.
+- `apps/api/scripts/db.test.ts`: directly affected policy fixture updated for the
+  approved real manifest; pending-state rejection retained; wrong-digest
+  pre-resource rejection tested for both applying commands.
+- `docs/milestones/checkpoint-3b1-offline-report.md`: current approval boundary and
+  this evidence addendum; original pending-state results retained as history.
+
+Six additional deterministic cases prove that altered 0001/0002 bytes and an
+unrecognized local migration fail the actual file verifier, a modified initial
+history checksum fails history admission, and both applying paths reject a
+different digest before environment loading, connection construction or process
+dispatch. Filesystem mutations are injected into read responses only; no SQL file
+is modified. Existing unknown/extra/duplicate/failed/reordered history and pending
+approval tests remain. The default pure policy now accepts only the exact pinned
+reviewed digest; no real execution command was invoked to demonstrate acceptance.
+
+Verification was sequential after inspecting root/workspace scripts and the
+database wrapper. All commands below completed with exit code 0 on their first
+run in this approval pass:
+
+| Command/check | Actual result |
+| --- | --- |
+| `npm.cmd exec -- vitest run --project unit apps/api/scripts` | 79/79 tests across 2/2 files |
+| `npm.cmd run lint` | Passed |
+| `npm.cmd run typecheck` | Passed across workspaces/root/E2E |
+| `npm.cmd test` | 1,354/1,354 tests across 44/44 files |
+| `npm.cmd run build` | Contracts, API and production frontend passed |
+| `git diff --check` and report content/SQL comparison | Passed |
+| Exact SQL byte hashes and Git inventory | Both hashes unchanged; only the four files above modified |
+
+Typecheck/test/build retain their existing offline Prisma client-generation
+steps into ignored output. No SQL generation, database connection, SQL execution,
+db/db:verify or migration-deployment command, fixture command, integration suite,
+service/browser operation, dependency/configuration change or Git publication
+occurred. Prisma schema, contracts, product code, existing guards, B2/C1 behavior,
+CI and the deferred year-0001 date-policy code remain unchanged.
+
+Technical effect: the wrapper's source-approval check can now accept the exact
+reviewed digest, after which existing environment, file, identity and history
+checks remain required. There is no new runtime target-authorization ledger;
+human approval of each test/development execution remains an independent boundary.
+No migration command may be run merely because this source approval is recorded.
+Live transaction, constraint, lock and schema behavior remain unverified here.
+
+Final Git inventory for this pass:
+
+```text
+ M apps/api/scripts/db.test.ts
+ M apps/api/scripts/migration-policy.test.ts
+ M apps/api/scripts/migration-policy.ts
+ M docs/milestones/checkpoint-3b1-offline-report.md
+```
+
+No untracked files or staged changes. Branch and HEAD remain at the confirmed
+baseline. Nothing was staged, committed, pushed, merged or deployed. This pass
+does not authorize Stage 3B.2 or SQL execution against either target.

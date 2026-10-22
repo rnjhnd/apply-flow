@@ -11,9 +11,9 @@ export const initialChecksum = '98fab302c1f9d6a053d549bdbb9aec2bece4e24322fb1292
 export const baselineChecksum = '043b3e43163c7aa05f09be3d3a3dabd5e9698418bca265c40bad9fe022dd1129';
 export const migrationChain: readonly MigrationSpec[] = Object.freeze([
   Object.freeze({ name: '0001_init_auth', sha256: initialChecksum, approval: 'APPROVED' as const }),
-  // A digest is integrity evidence, not permission. This remains pending until a
-  // separately approved follow-up changes this explicit approval state.
-  Object.freeze({ name: '0002_job_applications', sha256: '74e056f699c2781c01f12d3195ed119074d5b0d4d04fef979c185e17d775a333', approval: 'REVIEW_PENDING' as const })
+  // Exact reviewed source only. Executing SQL against either target still
+  // requires separate explicit authorization; this manifest does not grant it.
+  Object.freeze({ name: '0002_job_applications', sha256: '74e056f699c2781c01f12d3195ed119074d5b0d4d04fef979c185e17d775a333', approval: 'APPROVED' as const })
 ]);
 export const prismaRoot = fileURLToPath(new URL('../prisma/', import.meta.url));
 export const migrationsRoot = fileURLToPath(new URL('../prisma/migrations/', import.meta.url));

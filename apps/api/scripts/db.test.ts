@@ -10,15 +10,16 @@ vi.mock('node:fs/promises', async (original) => ({ ...await original<typeof Fs>(
 vi.mock('node:fs', async (original) => ({ ...await original<typeof import('node:fs')>(), existsSync: ports.exists }));
 vi.mock('../src/config/load-env.js', () => ({ loadLocalEnvironment: ports.load, localEnvPath: 'never-loaded.env' }));
 vi.mock('../src/db/client.js', () => ({ openLocalDatabase: ports.connect }));
-// Future approval is simulated only inside this isolated test module. The real
-// frozen manifest is never mutated and remains pending in the executable CLI.
+// Keep pending-state rejection as an explicit historical fixture. The true branch
+// uses the real source-approved manifest; all execution I/O is still mocked.
 vi.mock('./migration-policy.js', async (original) => {
   const actual = await original<typeof import('./migration-policy.js')>();
-  const approved = actual.migrationChain.map((entry) => ({ ...entry, approval: 'APPROVED' as const }));
+  const pending = actual.migrationChain.map((entry) => entry.name === '0002_job_applications'
+    ? { ...entry, approval: 'REVIEW_PENDING' as const } : entry);
   return { ...actual,
-    assertDeploymentApproval: (args: string[]) => actual.assertDeploymentApproval(args, ports.approve() ? approved : actual.migrationChain),
+    assertDeploymentApproval: (args: string[]) => actual.assertDeploymentApproval(args, ports.approve() ? actual.migrationChain : pending),
     validateMigrationHistory: (rows: unknown, options: { allowInitialPrefix?: boolean } = {}) =>
-      actual.validateMigrationHistory(rows, { ...options, chain: ports.approve() ? approved : actual.migrationChain })
+      actual.validateMigrationHistory(rows, { ...options, chain: ports.approve() ? actual.migrationChain : pending })
   };
 });
 
@@ -218,6 +219,13 @@ describe('offline database command boundaries', () => {
   });
   it.each(['migrate:deploy', 'migrate:test'])('rejects %s before environment loading, driver import or subprocess creation', async (command) => {
     await expect(main([command, '--approved-sql-sha256', migrationChain[1]!.sha256!])).rejects.toThrow('REVIEW_PENDING');
+    expect(ports.load).not.toHaveBeenCalled();
+    expect(ports.connect).not.toHaveBeenCalled();
+    expect(ports.spawn).not.toHaveBeenCalled();
+  });
+  it.each(['migrate:deploy', 'migrate:test'])('rejects a different SQL digest for %s before resources despite source approval', async (command) => {
+    ports.approve.mockReturnValue(true);
+    await expect(main([command, '--approved-sql-sha256', 'f'.repeat(64)])).rejects.toThrow('Explicit approval of the exact second migration SQL digest is required.');
     expect(ports.load).not.toHaveBeenCalled();
     expect(ports.connect).not.toHaveBeenCalled();
     expect(ports.spawn).not.toHaveBeenCalled();
