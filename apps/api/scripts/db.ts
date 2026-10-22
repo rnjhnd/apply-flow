@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -10,12 +10,15 @@ import {
   type DatabaseTargetName
 } from '../src/config/database.js';
 import { loadLocalEnvironment, localEnvPath } from '../src/config/load-env.js';
+import { assertDeploymentApproval, baselineChecksum, initialChecksum, migrationChain,
+  sqlDigest, validateMigrationDirectory, validateMigrationHistory, validateMigrationTables,
+  verifyMigrationFiles, wrapApplicationDiff, type MigrationHistoryRow } from './migration-policy.js';
 
 const apiRoot = fileURLToPath(new URL('../', import.meta.url));
 const repositoryRoot = resolve(apiRoot, '../..');
 const migrationsRoot = join(apiRoot, 'prisma/migrations');
-const initialDirectory = join(migrationsRoot, '0001_init_auth');
-const sqlPath = join(initialDirectory, 'migration.sql');
+const applicationDirectory = join(migrationsRoot, '0002_job_applications');
+const sqlPath = join(applicationDirectory, 'migration.sql');
 const require = createRequire(import.meta.url);
 
 function safeOutput(value: string): string {
@@ -29,9 +32,12 @@ function safeOutput(value: string): string {
 
 function childEnvironment(target?: DatabaseTargetName): NodeJS.ProcessEnv {
   const environment = { ...process.env };
-  // Do not let inherited libpq settings change the target/schema selected by our URL.
-  for (const key of Object.keys(environment)) if (key.toUpperCase().startsWith('PG')) delete environment[key];
-  delete environment.PRISMA_MIGRATION_TARGET;
+  // Copied records are case-sensitive even on Windows. Remove every inherited
+  // selector before setting a deliberate target; offline children receive none.
+  for (const key of Object.keys(environment)) {
+    const normalized = key.toUpperCase();
+    if (normalized.startsWith('PG') || normalized === 'PRISMA_MIGRATION_TARGET') delete environment[key];
+  }
   environment.XDG_CACHE_HOME = join(repositoryRoot, '.cache');
   environment.PRISMA_HIDE_UPDATE_MESSAGE = '1';
   if (target) {
@@ -100,42 +106,32 @@ async function verifyDatabase(target: DatabaseTargetName): Promise<void> {
   } finally { await client.$disconnect(); }
 }
 
-async function createInitialMigration(args: string[]): Promise<void> {
-  if (args.length !== 2 || args[0] !== '--name' || args[1] !== 'init_auth') {
-    throw new DatabaseConfigurationError('This initial-only generator requires --name init_auth.');
+async function createApplicationMigration(args: string[]): Promise<void> {
+  if (args.length !== 2 || args[0] !== '--name' || args[1] !== 'job_applications') {
+    throw new DatabaseConfigurationError('This offline generator requires --name job_applications.');
   }
   const existing = await readdir(migrationsRoot);
-  if (existing.some((entry) => entry !== 'migration_lock.toml')) {
-    throw new DatabaseConfigurationError('A migration already exists; the initial-only generator will not overwrite or regenerate it.');
+  validateMigrationDirectory(existing, false);
+  const initial = await readFile(join(migrationsRoot, '0001_init_auth/migration.sql'));
+  const baselinePath = join(apiRoot, 'prisma/baselines/0001_init_auth.prisma');
+  if (sqlDigest(initial) !== initialChecksum || sqlDigest(await readFile(baselinePath)) !== baselineChecksum) {
+    throw new DatabaseConfigurationError('Initial migration or frozen schema bytes changed; generation refused.');
   }
-  await mkdir(initialDirectory, { recursive: false });
+  await mkdir(applicationDirectory, { recursive: false });
   // No datasource selection, database connection, shadow database, or migration application.
-  prisma(['migrate', 'diff', '--from-empty', '--to-schema', join(apiRoot, 'prisma/schema.prisma'), '--script', '--output', sqlPath]);
+  prisma(['migrate', 'diff', '--from-schema', baselinePath, '--to-schema', join(apiRoot, 'prisma/schema.prisma'), '--script', '--output', sqlPath]);
   if (!existsSync(sqlPath)) {
     throw new DatabaseConfigurationError('Prisma did not produce migration SQL; the empty directory was retained for inspection. No database changes were made.');
   }
-  const sql = await readFile(sqlPath, 'utf8');
-  if (!sql.trim()) throw new DatabaseConfigurationError('Prisma produced empty SQL; stop for inspection before any approval.');
+  const sql = wrapApplicationDiff(await readFile(sqlPath, 'utf8'));
+  await writeFile(sqlPath, sql, { encoding: 'utf8', flag: 'w' });
   console.info(`Generated ${sqlPath}`);
-  console.info(`SQL SHA-256: ${createHash('sha256').update(sql).digest('hex')}`);
-  console.info('STOP: SQL approval is required before applying either database migration or running persistence integration tests.');
+  console.info(`SQL SHA-256: ${sqlDigest(await readFile(sqlPath))}`);
+  console.info('REVIEW_PENDING: Pin this candidate digest, then STOP for separate SQL approval before deployment or integration tests.');
   console.info(sql);
 }
 
-async function applyApprovedMigration(target: DatabaseTargetName, args: string[]): Promise<void> {
-  if (args.length !== 2 || args[0] !== '--approved-sql-sha256' || !/^[a-f0-9]{64}$/.test(args[1] ?? '')) {
-    throw new DatabaseConfigurationError('SQL approval is required: supply --approved-sql-sha256 only after explicit approval of the generated SQL.');
-  }
-  const names = await readdir(migrationsRoot);
-  if (names.some((entry) => !['0001_init_auth', 'migration_lock.toml'].includes(entry))) {
-    throw new DatabaseConfigurationError('Unexpected migrations found; this checkpoint only permits the reviewed initial migration.');
-  }
-  const sql = await readFile(sqlPath, 'utf8');
-  if (createHash('sha256').update(sql).digest('hex') !== args[1]) {
-    throw new DatabaseConfigurationError('SQL digest does not match the reviewed migration.');
-  }
-  if (target === 'test') requireTestDatabaseTarget({ ...process.env, NODE_ENV: 'test' });
-  else readDatabaseTarget(target, process.env);
+async function inspectMigrationState(target: DatabaseTargetName): Promise<1 | 2> {
   const { openLocalDatabase } = await import('../src/db/client.js');
   const { client } = await openLocalDatabase(target, process.env);
   try {
@@ -144,38 +140,44 @@ async function applyApprovedMigration(target: DatabaseTargetName, args: string[]
       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
     `;
     const hasHistory = tables.some((table) => table.table_name === '_prisma_migrations');
-    if (hasHistory) {
-      const history = await client.$queryRaw<Array<{ migration_name: string; checksum: string; finished_at: Date | null; rolled_back_at: Date | null }>>`
-        SELECT migration_name, checksum, finished_at, rolled_back_at FROM public._prisma_migrations
-      `;
-      if (history.length > 1 || history.some((row) => row.migration_name !== '0001_init_auth'
-        || row.checksum !== args[1] || !row.finished_at || row.rolled_back_at)) {
-        throw new DatabaseConfigurationError('Conflicting or incomplete migration history found; stop for review.');
-      }
-      if (history.length === 1) {
-        const expectedTables = ['_prisma_migrations', 'User', 'Session'];
-        if (tables.length !== expectedTables.length || tables.some((table) => !expectedTables.includes(table.table_name))) {
-          throw new DatabaseConfigurationError('Applied schema has unexpected tables; stop for review.');
-        }
-        console.info('The reviewed initial migration is already applied; no changes made.');
-        return;
-      }
-    }
-    if (tables.some((table) => table.table_name !== '_prisma_migrations')) {
-      throw new DatabaseConfigurationError('Existing application tables found; stop for review rather than resetting or baselining.');
-    }
+    if (!hasHistory) throw new DatabaseConfigurationError('Missing approved initial migration history; no reset or baseline adoption is permitted.');
+    const history = await client.$queryRaw<MigrationHistoryRow[]>`
+      SELECT migration_name, checksum, started_at, finished_at, rolled_back_at, applied_steps_count, logs
+      FROM public._prisma_migrations
+    `;
+    const count = validateMigrationHistory(history, { allowInitialPrefix: true });
+    validateMigrationTables(tables.map((table) => table.table_name), count);
+    return count;
   } finally { await client.$disconnect(); }
-  prisma(['migrate', 'deploy'], target);
 }
 
-async function main(): Promise<void> {
-  const [command, ...args] = process.argv.slice(2);
+async function applyApprovedMigration(target: DatabaseTargetName, args: string[]): Promise<void> {
+  assertDeploymentApproval(args);
+  await verifyMigrationFiles();
+  if (target === 'test') requireTestDatabaseTarget(process.env);
+  else readDatabaseTarget(target, process.env);
+  if (await inspectMigrationState(target) === migrationChain.length) {
+    console.info('The exact reviewed migration chain is already applied; no changes made.');
+    return;
+  }
+  await verifyMigrationFiles();
+  prisma(['migrate', 'deploy'], target);
+  if (await inspectMigrationState(target) !== migrationChain.length) {
+    throw new DatabaseConfigurationError('Migration completion was not verified; stop for review without retry.');
+  }
+}
+
+export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+  const [command, ...args] = argv;
   // Offline builds may set NODE_ENV=production; they must never select a datasource.
   if (command === 'generate' || command === 'validate') {
     if (args.length) throw new DatabaseConfigurationError('Unexpected arguments.');
     prisma([command]);
     return;
   }
+  if (command === 'migrate:create') return createApplicationMigration(args);
+  // Approval denial must precede environment loading and all live construction.
+  if (command === 'migrate:deploy' || command === 'migrate:test') assertDeploymentApproval(args);
   if (process.env.NODE_ENV && !['development', 'test'].includes(process.env.NODE_ENV)) {
     throw new DatabaseConfigurationError('This checkpoint provides local database tooling only.');
   }
@@ -188,7 +190,6 @@ async function main(): Promise<void> {
   if (process.env.NODE_ENV && !['development', 'test'].includes(process.env.NODE_ENV)) {
     throw new DatabaseConfigurationError('This checkpoint provides local database tooling only.');
   }
-  if (command === 'migrate:create') return createInitialMigration(args);
   if (command === 'migrate:deploy') return applyApprovedMigration('development', args);
   if (command === 'migrate:test') return applyApprovedMigration('test', args);
   if (args.length) throw new DatabaseConfigurationError('Unexpected arguments.');
@@ -202,7 +203,7 @@ async function main(): Promise<void> {
   }
 }
 
-void main().catch((error: unknown) => {
+if (import.meta.main) void main().catch((error: unknown) => {
   console.error(error instanceof DatabaseConfigurationError ? error.message : 'Database tooling failed; no automatic reset or cleanup was attempted.');
   process.exitCode = 1;
 });

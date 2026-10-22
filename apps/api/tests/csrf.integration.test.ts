@@ -1,5 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
@@ -12,6 +11,7 @@ import { createAuthAdmission } from '../src/modules/auth/admission.js';
 import type { BootstrapSessions } from '../src/modules/auth/csrf.js';
 import { ANONYMOUS_LIFETIME_MS, createSessionService, IDLE_LIFETIME_MS } from '../src/modules/auth/sessions.js';
 import { hashSessionToken } from '../src/modules/auth/tokens.js';
+import { assertApprovedChain, verifyMigrationFiles, validateMigrationHistory, type MigrationHistoryRow } from '../scripts/migration-policy.js';
 
 const path = '/api/v1/auth/csrf';
 const headers = { 'X-ApplyFlow-Request': '1' };
@@ -46,14 +46,13 @@ async function ownedCount() { return client().session.count({ where: { id: { in:
 beforeAll(async () => {
   loadLocalEnvironment();
   requireTestDatabaseTarget(process.env);
-  const sqlHash = createHash('sha256').update(readFileSync(new URL('../prisma/migrations/0001_init_auth/migration.sql', import.meta.url))).digest('hex');
-  expect(sqlHash).toBe('98fab302c1f9d6a053d549bdbb9aec2bece4e24322fb1292948647ed693ac840');
+  assertApprovedChain();
+  await verifyMigrationFiles();
   connection = await openLocalDatabase('test', process.env);
-  const history = await client().$queryRaw<Array<{ checksum: string; finished_at: Date | null; rolled_back_at: Date | null }>>`
-    SELECT checksum, finished_at, rolled_back_at FROM public._prisma_migrations
+  const history = await client().$queryRaw<MigrationHistoryRow[]>`
+    SELECT migration_name, checksum, started_at, finished_at, rolled_back_at, applied_steps_count, logs FROM public._prisma_migrations
   `;
-  expect(history).toHaveLength(1);
-  expect(history[0]).toMatchObject({ checksum: sqlHash, finished_at: expect.any(Date), rolled_back_at: null });
+  validateMigrationHistory(history);
 });
 beforeEach(() => { time = Date.UTC(2026, 0, 1); });
 afterEach(async () => {
