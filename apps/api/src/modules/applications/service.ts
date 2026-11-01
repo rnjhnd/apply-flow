@@ -1,5 +1,8 @@
 import { applicationSchema, createApplicationRequestSchema, createApplicationResponseSchema,
-  listApplicationsQuerySchema, listApplicationsResponseSchema, type ApplicationErrorResponse } from '@applyflow/contracts';
+  listApplicationsQuerySchema, listApplicationsResponseSchema, applicationIdSchema,
+  getApplicationResponseSchema, updateApplicationRequestSchema, updateApplicationResponseSchema,
+  listApplicationHistoryQuerySchema, listApplicationHistoryResponseSchema,
+  type ApplicationErrorResponse } from '@applyflow/contracts';
 import type { Prisma, Session } from '../../generated/prisma/client.ts';
 import { createSessionService, isSessionValid } from '../auth/sessions.js';
 import { hashSessionToken, matchesCsrfToken } from '../auth/tokens.js';
@@ -7,25 +10,31 @@ import { createApplicationDatePolicy } from './date-policy.js';
 import { ApplicationHttpError } from './http-error.js';
 import { decodeApplicationCursor, encodeApplicationCursor } from './pagination.js';
 
-export type ApplicationTransaction = Pick<Prisma.TransactionClient, '$queryRaw' | 'session' | 'jobApplication'>;
+export type ApplicationTransaction = Pick<Prisma.TransactionClient, '$queryRaw' | 'session' | 'jobApplication' | 'applicationStatusHistory'>;
 export type ApplicationDatabase = {
   $transaction<T>(work: (transaction: ApplicationTransaction) => Promise<T>): Promise<T>;
 };
 export type ApplicationProof = { token: string; csrfToken?: string | undefined };
 const selection = { id: true, company: true, jobTitle: true, status: true, applicationDate: true,
-  location: true, jobUrl: true, notes: true, createdAt: true, updatedAt: true } as const;
+  location: true, jobUrl: true, notes: true, createdAt: true, updatedAt: true, version: true } as const;
 type PublicRow = Prisma.JobApplicationGetPayload<{ select: typeof selection }>;
 
 function dto(row: PublicRow) {
   // Prisma's PostgreSQL DATE representation is UTC midnight, never browser/local time.
   if (row.applicationDate && (row.applicationDate.getUTCHours() !== 0 || row.applicationDate.getUTCMinutes() !== 0
     || row.applicationDate.getUTCSeconds() !== 0 || row.applicationDate.getUTCMilliseconds() !== 0)) throw new Error();
-  return applicationSchema.parse({ id: row.id, company: row.company, jobTitle: row.jobTitle, status: row.status,
+  return applicationSchema.parse({ id: row.id, version: row.version, company: row.company, jobTitle: row.jobTitle, status: row.status,
     applicationDate: row.applicationDate?.toISOString().slice(0, 10) ?? null, location: row.location,
     jobUrl: row.jobUrl, notes: row.notes, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() });
 }
 
 const unauthenticated = () => new ApplicationHttpError(401, 'UNAUTHENTICATED', 'A valid authenticated session is required.');
+const notFound = () => new ApplicationHttpError(404, 'NOT_FOUND', 'Application not found.');
+function applicationId(input: unknown) {
+  const parsed = applicationIdSchema.safeParse(input);
+  if (!parsed.success) throw new ApplicationHttpError(400, 'INVALID_REQUEST', 'Invalid application ID.');
+  return parsed.data;
+}
 export function createApplicationService(database: ApplicationDatabase, options: { now: () => Date; timeZone: string }) {
   const datePolicy = createApplicationDatePolicy(options);
   async function safely<T>(work: () => Promise<T>): Promise<T> {
@@ -48,6 +57,91 @@ export function createApplicationService(database: ApplicationDatabase, options:
     return session.userId;
   }
   return {
+    get(id: unknown, proof: ApplicationProof) {
+      return safely(async () => {
+        const key = applicationId(id);
+        return database.$transaction(async transaction => {
+          const userId = await owner(transaction, proof, false);
+          const row = await transaction.jobApplication.findFirst({ where: { id: key, userId }, select: selection });
+          if (!row) throw notFound();
+          return getApplicationResponseSchema.parse({ application: dto(row) });
+        });
+      });
+    },
+    update(id: unknown, input: unknown, proof: ApplicationProof) {
+      return safely(async () => {
+        const key = applicationId(id);
+        const parsed = updateApplicationRequestSchema.safeParse(input);
+        if (!parsed.success) {
+          const fieldErrors: NonNullable<ApplicationErrorResponse['fieldErrors']> = {};
+          for (const field of ['company', 'jobTitle', 'status', 'applicationDate', 'location', 'jobUrl', 'notes'] as const) {
+            if (parsed.error.issues.some(issue => issue.path[0] === field)) fieldErrors[field] = ['Review this field.'];
+          }
+          throw new ApplicationHttpError(400, 'INVALID_REQUEST', 'Review the application fields.', fieldErrors);
+        }
+        const value = parsed.data;
+        const policy = datePolicy(value.applicationDate);
+        if (!policy.valid) throw new ApplicationHttpError(400, 'INVALID_REQUEST', 'Review the application date.', { applicationDate: [policy.message] });
+        return database.$transaction(async transaction => {
+          const userId = await owner(transaction, proof, true);
+          // Always Session -> owned Application; another owner's row is never locked.
+          const rows = await transaction.$queryRaw<PublicRow[]>`
+            SELECT id, company, "jobTitle", status, "applicationDate", location, "jobUrl", notes,
+              "createdAt", "updatedAt", version FROM public."JobApplication"
+            WHERE id = ${key}::uuid AND "userId" = ${userId}::uuid FOR UPDATE
+          `;
+          const previous = rows[0];
+          if (!previous) throw notFound();
+          if (previous.version !== value.expectedVersion) {
+            throw new ApplicationHttpError(409, 'APPLICATION_CONFLICT', 'Application changed. Reload it and review your changes before saving again.');
+          }
+          const current = dto(previous);
+          const fields = ['company', 'jobTitle', 'status', 'applicationDate', 'location', 'jobUrl', 'notes'] as const;
+          if (fields.every(field => current[field] === value[field])) {
+            return updateApplicationResponseSchema.parse({ application: current });
+          }
+          // Do not overflow PostgreSQL INTEGER or manufacture a wrapped revision.
+          if (previous.version === 2_147_483_647) throw new Error('Application revision exhausted.');
+          const row = await transaction.jobApplication.update({ where: { id: key, userId }, data: {
+            company: value.company, jobTitle: value.jobTitle, status: value.status,
+            applicationDate: value.applicationDate === null ? null : new Date(`${value.applicationDate}T00:00:00.000Z`),
+            location: value.location, jobUrl: value.jobUrl, notes: value.notes,
+            version: previous.version + 1, updatedAt: options.now()
+          }, select: selection });
+          if (row.version !== previous.version + 1) throw new Error('Unexpected application revision.');
+          if (previous.status !== value.status) {
+            await transaction.applicationStatusHistory.create({ data: {
+              applicationId: key, fromStatus: previous.status, toStatus: value.status,
+              applicationVersion: row.version
+            } });
+          }
+          return updateApplicationResponseSchema.parse({ application: dto(row) });
+        });
+      });
+    },
+    history(id: unknown, input: unknown, proof: ApplicationProof) {
+      return safely(async () => {
+        const key = applicationId(id);
+        const parsed = listApplicationHistoryQuerySchema.safeParse(input);
+        if (!parsed.success) throw new ApplicationHttpError(400, 'INVALID_REQUEST', 'Invalid history query.');
+        const { limit, cursor } = parsed.data;
+        return database.$transaction(async transaction => {
+          const userId = await owner(transaction, proof, false);
+          const parent = await transaction.jobApplication.findFirst({ where: { id: key, userId }, select: { id: true } });
+          if (!parent) throw notFound();
+          const rows = await transaction.applicationStatusHistory.findMany({ where: {
+            applicationId: key, application: { userId },
+            ...(cursor === undefined ? {} : { applicationVersion: { lt: Number(cursor) } })
+          }, orderBy: { applicationVersion: 'desc' }, take: limit + 1,
+          select: { id: true, fromStatus: true, toStatus: true, applicationVersion: true, changedAt: true } });
+          const items = rows.slice(0, limit);
+          return listApplicationHistoryResponseSchema.parse({ items: items.map(row => ({
+            id: row.id, fromStatus: row.fromStatus, toStatus: row.toStatus,
+            applicationVersion: row.applicationVersion, changedAt: row.changedAt.toISOString()
+          })), nextCursor: rows.length > limit ? String(items[items.length - 1]!.applicationVersion) : null });
+        });
+      });
+    },
     create(input: unknown, proof: ApplicationProof) {
       return safely(async () => {
         const parsed = createApplicationRequestSchema.safeParse(input);

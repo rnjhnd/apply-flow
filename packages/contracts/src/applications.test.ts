@@ -1,14 +1,61 @@
 import { describe, expect, it } from 'vitest';
 import { applicationDateSchema, applicationErrorResponseSchema, applicationSchema, applicationStatusSchema,
   createApplicationRequestSchema, createApplicationResponseSchema, listApplicationsQuerySchema,
-  listApplicationsResponseSchema } from './applications.js';
+  listApplicationsResponseSchema, updateApplicationRequestSchema, applicationStatusHistorySchema,
+  listApplicationHistoryQuerySchema, listApplicationHistoryResponseSchema } from './applications.js';
 
 const input = { company: 'Acme', jobTitle: 'Engineer' };
 const dto = {
-  id: '7bf22ee7-a3be-40de-957e-89fca7bac5ad', ...input, status: 'SAVED', applicationDate: null,
+  id: '7bf22ee7-a3be-40de-957e-89fca7bac5ad', version: 1, ...input, status: 'SAVED', applicationDate: null,
   location: null, jobUrl: null, notes: null,
   createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z'
 };
+const edit = { ...input, status: 'SAVED', applicationDate: null, location: null, jobUrl: null, notes: null, expectedVersion: 1 };
+
+describe('complete versioned edits and history contracts', () => {
+  it.each(Object.keys(edit))('requires the %s update key, including nullable values', field => {
+    const omitted: Record<string, unknown> = { ...edit }; delete omitted[field];
+    expect(updateApplicationRequestSchema.safeParse(omitted).success).toBe(false);
+    expect(updateApplicationRequestSchema.safeParse({ ...edit, [field]: undefined }).success).toBe(false);
+  });
+  it.each(['id', 'userId', 'ownerId', 'version', 'createdAt', 'updatedAt', 'history', 'applicationVersion'])('rejects update override %s', field => {
+    expect(updateApplicationRequestSchema.safeParse({ ...edit, [field]: 'injected' }).success).toBe(false);
+  });
+  it.each([0, -1, 1.5, '1', null, 2_147_483_648])('rejects invalid revision %#', expectedVersion => {
+    expect(updateApplicationRequestSchema.safeParse({ ...edit, expectedVersion }).success).toBe(false);
+    expect(applicationSchema.safeParse({ ...dto, version: expectedVersion }).success).toBe(false);
+  });
+  it('normalizes existing fields while preserving meaningful notes and explicit nulls', () => {
+    expect(updateApplicationRequestSchema.parse({ ...edit, company: ' Acme ', jobTitle: ' Engineer ',
+      applicationDate: '', location: '  ', jobUrl: ' ', notes: ' line\n ' })).toEqual({ ...edit, notes: ' line\n ' });
+    expect(updateApplicationRequestSchema.safeParse(edit).success).toBe(true);
+    expect(applicationSchema.safeParse({ ...dto, version: undefined }).success).toBe(false);
+    expect(applicationErrorResponseSchema.safeParse({ code: 'APPLICATION_CONFLICT', message: 'Reload application.' }).success).toBe(true);
+  });
+  it.each(applicationStatusSchema.options)('retains status/date requirements for %s', status => {
+    expect(updateApplicationRequestSchema.safeParse({ ...edit, status }).success).toBe(status === 'SAVED');
+    expect(updateApplicationRequestSchema.safeParse({ ...edit, status, applicationDate: '2024-02-29' }).success).toBe(true);
+  });
+  it.each([{ company: '' }, { jobTitle: 'x'.repeat(201) }, { notes: 'x'.repeat(4001) }, { location: 1 },
+    { jobUrl: 'https://user:pass@example.invalid' }, { applicationDate: '2025-02-29' }, { notes: '\u0000' }])('retains input policies %#', change => {
+    expect(updateApplicationRequestSchema.safeParse({ ...edit, ...change }).success).toBe(false);
+  });
+  it('uses canonical bounded integer history cursors and strict safe response fields', () => {
+    expect(listApplicationHistoryQuerySchema.parse({})).toEqual({ limit: 20 });
+    expect(listApplicationHistoryQuerySchema.parse({ limit: '50', cursor: '2147483647' })).toEqual({ limit: 50, cursor: '2147483647' });
+    for (const cursor of ['', '0', '-1', '01', '1.0', ' 2', '2\n', '2147483648', 2, ['2']]) {
+      expect(listApplicationHistoryQuerySchema.safeParse({ cursor }).success).toBe(false);
+    }
+    for (const query of [{ limit: 51 }, { limit: 0 }, { ownerId: dto.id }]) expect(listApplicationHistoryQuerySchema.safeParse(query).success).toBe(false);
+    const event = { id: dto.id, fromStatus: 'SAVED', toStatus: 'APPLIED', applicationVersion: 2, changedAt: dto.createdAt };
+    expect(applicationStatusHistorySchema.parse(event)).toEqual(event);
+    for (const change of [{ toStatus: 'SAVED' }, { applicationVersion: 1 }, { changedAt: '2026-10-22' },
+      { applicationId: dto.id }, { userId: dto.id }, { csrfToken: 'secret' }]) {
+      expect(applicationStatusHistorySchema.safeParse({ ...event, ...change }).success).toBe(false);
+    }
+    expect(listApplicationHistoryResponseSchema.safeParse({ items: Array(51).fill(event), nextCursor: null }).success).toBe(false);
+  });
+});
 
 describe('application contracts', () => {
   it('defaults a saved application and normalizes optional blanks', () => {

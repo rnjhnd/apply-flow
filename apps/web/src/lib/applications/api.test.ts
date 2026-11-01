@@ -5,7 +5,7 @@ import { createAuthStore } from '../auth/store';
 import { AuthFailure, type AuthApi } from '../auth/api';
 import type { AuthCoordination, AuthCoordinationEvent } from '../auth/coordination';
 
-const dto = { id: 'c4974360-a70c-4a29-8b41-df95d15d7270', company: 'Acme', jobTitle: 'Engineer', status: 'SAVED',
+const dto = { id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED',
   applicationDate: null, location: null, jobUrl: null, notes: null, createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z' };
 const json = (body: unknown, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
 async function fixture() {

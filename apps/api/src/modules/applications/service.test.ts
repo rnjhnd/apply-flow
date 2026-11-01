@@ -8,7 +8,7 @@ const id = 'c4974360-a70c-4a29-8b41-df95d15d7270';
 const now = new Date('2026-10-22T01:00:00.000Z');
 const proof = { token: 'a'.repeat(64), csrfToken: 'b'.repeat(64) };
 const input = { company: ' Acme ', jobTitle: ' Engineer ' };
-const row = { id, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED' as const, applicationDate: null as Date | null,
+const row = { id, version: 1, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED' as const, applicationDate: null as Date | null,
   location: null, jobUrl: null, notes: null, createdAt: now, updatedAt: now, userId, passwordHash: 'PRIVATE' };
 function fixture() {
   const session: Session = { id, userId, tokenHash: 'c'.repeat(64), csrfToken: proof.csrfToken,
