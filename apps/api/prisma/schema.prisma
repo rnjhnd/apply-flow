@@ -57,7 +57,25 @@ model JobApplication {
   notes           String?           @db.Text
   createdAt       DateTime          @default(now()) @db.Timestamptz(3)
   updatedAt       DateTime          @updatedAt @db.Timestamptz(3)
+  // Positive-version CHECK is maintained in 0003_application_status_history.
+  version         Int              @default(1)
   user            User              @relation(fields: [userId], references: [id], onDelete: Restrict)
+  statusHistory   ApplicationStatusHistory[]
 
   @@index([userId, createdAt(sort: Desc), id(sort: Desc)])
+}
+
+// Only actual transitions are recorded. No synthetic creation/backfill events.
+// Permanent deletion requires a separately approved history-cleanup policy.
+model ApplicationStatusHistory {
+  id                 String            @id @default(uuid()) @db.Uuid
+  applicationId      String            @db.Uuid
+  fromStatus         ApplicationStatus
+  toStatus           ApplicationStatus
+  applicationVersion Int
+  changedAt          DateTime          @default(now()) @db.Timestamptz(3)
+  application        JobApplication    @relation(fields: [applicationId], references: [id], onDelete: Restrict)
+
+  // Also supports deterministic per-application revision ordering in either direction.
+  @@unique([applicationId, applicationVersion])
 }

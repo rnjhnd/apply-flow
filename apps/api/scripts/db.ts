@@ -10,9 +10,9 @@ import {
   type DatabaseTargetName
 } from '../src/config/database.js';
 import { loadLocalEnvironment, localEnvPath } from '../src/config/load-env.js';
-import { assertDeploymentApproval, baselineChecksum, initialChecksum, migrationChain,
+import { assertDeploymentApproval, applicationBaselineChecksum, applicationChecksum, baselineChecksum, initialChecksum, migrationChain,
   sqlDigest, validateMigrationDirectory, validateMigrationHistory, validateMigrationTables,
-  verifyMigrationFiles, wrapApplicationDiff, type MigrationHistoryRow } from './migration-policy.js';
+  verifyMigrationFiles, wrapApplicationDiff, wrapStatusHistoryDiff, type MigrationHistoryRow } from './migration-policy.js';
 
 const apiRoot = fileURLToPath(new URL('../', import.meta.url));
 const repositoryRoot = resolve(apiRoot, '../..');
@@ -131,7 +131,32 @@ async function createApplicationMigration(args: string[]): Promise<void> {
   console.info(sql);
 }
 
-async function inspectMigrationState(target: DatabaseTargetName): Promise<1 | 2> {
+async function createStatusHistoryMigration(args: string[]): Promise<void> {
+  if (args.length !== 2 || args[0] !== '--name' || args[1] !== 'application_status_history') {
+    throw new DatabaseConfigurationError('This offline generator requires --name application_status_history.');
+  }
+  validateMigrationDirectory(await readdir(migrationsRoot), 2);
+  const baselinePath = join(apiRoot, 'prisma/baselines/0002_job_applications.prisma');
+  if (sqlDigest(await readFile(join(migrationsRoot, '0001_init_auth/migration.sql'))) !== initialChecksum
+    || sqlDigest(await readFile(join(migrationsRoot, '0002_job_applications/migration.sql'))) !== applicationChecksum
+    || sqlDigest(await readFile(join(apiRoot, 'prisma/baselines/0001_init_auth.prisma'))) !== baselineChecksum
+    || sqlDigest(await readFile(baselinePath)) !== applicationBaselineChecksum) {
+    throw new DatabaseConfigurationError('Protected migration or baseline bytes changed; generation refused.');
+  }
+  const directory = join(migrationsRoot, '0003_application_status_history');
+  const output = join(directory, 'migration.sql');
+  await mkdir(directory, { recursive: false });
+  prisma(['migrate', 'diff', '--from-schema', baselinePath, '--to-schema', join(apiRoot, 'prisma/schema.prisma'), '--script', '--output', output]);
+  if (!existsSync(output)) throw new DatabaseConfigurationError('Offline history diff output missing; no retry or cleanup attempted.');
+  const sql = wrapStatusHistoryDiff(await readFile(output, 'utf8'));
+  await writeFile(output, sql, { encoding: 'utf8', flag: 'w' });
+  console.info(`Generated ${output}`);
+  console.info(`SQL SHA-256: ${sqlDigest(await readFile(output))}`);
+  console.info('REVIEW_PENDING: Separate approval of the exact SQL is required before any deployment or integration run.');
+  console.info(sql);
+}
+
+async function inspectMigrationState(target: DatabaseTargetName): Promise<1 | 2 | 3> {
   const { openLocalDatabase } = await import('../src/db/client.js');
   const { client } = await openLocalDatabase(target, process.env);
   try {
@@ -156,9 +181,13 @@ async function applyApprovedMigration(target: DatabaseTargetName, args: string[]
   await verifyMigrationFiles();
   if (target === 'test') requireTestDatabaseTarget(process.env);
   else readDatabaseTarget(target, process.env);
-  if (await inspectMigrationState(target) === migrationChain.length) {
+  const before = await inspectMigrationState(target);
+  if (before === migrationChain.length) {
     console.info('The exact reviewed migration chain is already applied; no changes made.');
     return;
+  }
+  if (before !== 2) {
+    throw new DatabaseConfigurationError('Third migration deployment requires exactly the completed 0001 + 0002 prefix; no earlier migration is authorized by this checksum.');
   }
   await verifyMigrationFiles();
   prisma(['migrate', 'deploy'], target);
@@ -175,7 +204,9 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     prisma([command]);
     return;
   }
-  if (command === 'migrate:create') return createApplicationMigration(args);
+  if (command === 'migrate:create') {
+    return args[1] === 'application_status_history' ? createStatusHistoryMigration(args) : createApplicationMigration(args);
+  }
   // Approval denial must precede environment loading and all live construction.
   if (command === 'migrate:deploy' || command === 'migrate:test') assertDeploymentApproval(args);
   if (process.env.NODE_ENV && !['development', 'test'].includes(process.env.NODE_ENV)) {

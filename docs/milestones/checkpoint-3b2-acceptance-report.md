@@ -35,13 +35,15 @@ Earlier guarded read-only post-test inspection verified
 and **User 0 / Session 0 / JobApplication 0**. No residual test-owned IDs remained;
 rollback and connection closure were confirmed.
 
-Execution-record discrepancy: the earlier manually reported command was
-`npm.cmd run test -- apps/api/tests/applications.integration.test.ts`. At this
-HEAD, `test` uses the ordinary Vitest configuration; `test:integration` selects
-`vitest.integration.config.ts`. The latest user confirmation explicitly states
-that the targeted integration configuration passed. Raw execution logs resolving
-the earlier command/configuration mismatch were not captured in this report;
-the reported command is not presented as independently verified runner evidence.
+The user confirmed the successful command and terminal result:
+
+```powershell
+$env:NODE_ENV = 'test'
+npm.cmd run test -- apps/api/tests/applications.integration.test.ts
+```
+
+The terminal selected `vitest.integration.config.ts` and reported 8/8 passing
+integration tests. This records the actual user-confirmed execution.
 
 ## Development migration and preservation
 
@@ -106,8 +108,6 @@ manually browser-tested. No automated browser execution logs are claimed.
   do not promise a shared snapshot during concurrent changes.
 - Manual acceptance establishes the reported flows, not exhaustive browser,
   accessibility, security, performance or production-readiness coverage.
-- The historical integration command/configuration discrepancy remains an
-  evidence-record limitation; no new execution was used to resolve it here.
 
 Stage 3B.2 acceptance is recorded. Stage 3C, Git publication and further runtime
 work are outside this documentation pass.

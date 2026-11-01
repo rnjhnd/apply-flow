@@ -9,11 +9,15 @@ export type MigrationSpec = Readonly<{
 }>;
 export const initialChecksum = '98fab302c1f9d6a053d549bdbb9aec2bece4e24322fb1292948647ed693ac840';
 export const baselineChecksum = '043b3e43163c7aa05f09be3d3a3dabd5e9698418bca265c40bad9fe022dd1129';
+export const applicationChecksum = '74e056f699c2781c01f12d3195ed119074d5b0d4d04fef979c185e17d775a333';
+export const applicationBaselineChecksum = '3d348c49d8756fa6d43372118f654ab4c45e8b87a9e96d86671ffaa03ec36521';
+export const historyChecksum = '7e607ec39d1c278e12bb6db8c5895f23d69ea3e695bd72519e96a34e9c93d85e';
 export const migrationChain: readonly MigrationSpec[] = Object.freeze([
   Object.freeze({ name: '0001_init_auth', sha256: initialChecksum, approval: 'APPROVED' as const }),
   // Exact reviewed source only. Executing SQL against either target still
   // requires separate explicit authorization; this manifest does not grant it.
-  Object.freeze({ name: '0002_job_applications', sha256: '74e056f699c2781c01f12d3195ed119074d5b0d4d04fef979c185e17d775a333', approval: 'APPROVED' as const })
+  Object.freeze({ name: '0002_job_applications', sha256: applicationChecksum, approval: 'APPROVED' as const }),
+  Object.freeze({ name: '0003_application_status_history', sha256: historyChecksum, approval: 'APPROVED' as const })
 ]);
 export const prismaRoot = fileURLToPath(new URL('../prisma/', import.meta.url));
 export const migrationsRoot = fileURLToPath(new URL('../prisma/migrations/', import.meta.url));
@@ -21,28 +25,31 @@ export function sqlDigest(bytes: Uint8Array | string): string { return createHas
 function fail(message: string): never { throw new DatabaseConfigurationError(message); }
 
 export function assertApprovedChain(chain: readonly MigrationSpec[] = migrationChain): void {
-  if (chain.length !== 2 || chain[0]?.name !== '0001_init_auth' || chain[0].sha256 !== initialChecksum
-    || chain[1]?.name !== '0002_job_applications') fail('Unexpected migration-chain definition.');
+  if (chain.length !== 3 || chain[0]?.name !== '0001_init_auth' || chain[0].sha256 !== initialChecksum
+    || chain[1]?.name !== '0002_job_applications' || chain[1].sha256 !== applicationChecksum
+    || chain[2]?.name !== '0003_application_status_history' || chain[2].sha256 !== historyChecksum) fail('Unexpected migration-chain definition.');
   if (chain.some((entry) => entry.approval !== 'APPROVED')) fail('Migration approval is REVIEW_PENDING; no database connection or deployment is permitted.');
   if (chain.some((entry) => !entry.sha256 || !/^[a-f0-9]{64}$/.test(entry.sha256) || entry.sha256.length !== 64)) fail('Missing or malformed approved migration digest.');
 }
 
 export function assertDeploymentApproval(args: readonly string[], chain: readonly MigrationSpec[] = migrationChain): void {
   assertApprovedChain(chain);
-  if (args.length !== 2 || args[0] !== '--approved-sql-sha256' || args[1] !== chain[1]?.sha256) {
-    fail('Explicit approval of the exact second migration SQL digest is required.');
+  if (args.length !== 2 || args[0] !== '--approved-sql-sha256' || args[1] !== chain[2]?.sha256) {
+    fail('Explicit approval of the exact third migration SQL digest is required.');
   }
 }
 
-export function validateMigrationDirectory(names: readonly string[], generated: boolean): void {
-  const expected = ['0001_init_auth', 'migration_lock.toml', ...(generated ? ['0002_job_applications'] : [])];
+export function validateMigrationDirectory(names: readonly string[], generated: boolean | 1 | 2 | 3): void {
+  // Boolean compatibility is restricted to the historical 0002 offline generator.
+  const count = typeof generated === 'boolean' ? generated ? 2 : 1 : generated;
+  const expected = ['migration_lock.toml', ...migrationChain.slice(0, count).map(entry => entry.name)];
   if (names.length !== expected.length || new Set(names).size !== names.length
     || names.some((name) => !expected.includes(name))) fail('Missing or unexpected migration files; no overwrite or recovery was attempted.');
 }
 
 export async function verifyMigrationFiles(): Promise<void> {
   const entries = await readdir(migrationsRoot, { withFileTypes: true });
-  validateMigrationDirectory(entries.map((entry) => entry.name), true);
+  validateMigrationDirectory(entries.map((entry) => entry.name), 3);
   for (const entry of entries) {
     if (entry.isSymbolicLink() || (entry.name === 'migration_lock.toml' ? !entry.isFile() : !entry.isDirectory())) {
       fail('Unexpected migration file type.');
@@ -54,6 +61,8 @@ export async function verifyMigrationFiles(): Promise<void> {
   }
   const baseline = await readFile(new URL('../prisma/baselines/0001_init_auth.prisma', import.meta.url));
   if (sqlDigest(baseline) !== baselineChecksum) fail('Frozen authentication schema does not match the reviewed baseline.');
+  const applicationBaseline = await readFile(new URL('../prisma/baselines/0002_job_applications.prisma', import.meta.url));
+  if (sqlDigest(applicationBaseline) !== applicationBaselineChecksum) fail('Frozen application schema does not match the pinned baseline.');
 }
 
 const historyRow = z.strictObject({
@@ -66,13 +75,13 @@ export type MigrationHistoryRow = z.infer<typeof historyRow>;
 // execution order; a shuffled SELECT result must not conceal reordered execution.
 export function validateMigrationHistory(input: unknown, options: {
   allowInitialPrefix?: boolean; chain?: readonly MigrationSpec[];
-} = {}): 1 | 2 {
+} = {}): 1 | 2 | 3 {
   const chain = options.chain ?? migrationChain;
   assertApprovedChain(chain);
   const parsed = z.array(historyRow).safeParse(input);
   if (!parsed.success) fail('Malformed or incomplete migration history.');
   const rows = parsed.data;
-  if (rows.length !== 2 && !(options.allowInitialPrefix && rows.length === 1)) fail('Missing or extra migration history.');
+  if (rows.length !== 3 && !(options.allowInitialPrefix && (rows.length === 1 || rows.length === 2))) fail('Missing or extra migration history.');
   if (new Set(rows.map((row) => row.migration_name)).size !== rows.length) fail('Duplicate migration history.');
   let previousFinished: number | undefined;
   for (const expected of chain.slice(0, rows.length)) {
@@ -81,13 +90,37 @@ export function validateMigrationHistory(input: unknown, options: {
       || (previousFinished !== undefined && row.started_at.getTime() < previousFinished)) fail('Conflicting or reordered migration history.');
     previousFinished = row.finished_at.getTime();
   }
-  return rows.length as 1 | 2;
+  return rows.length as 1 | 2 | 3;
 }
 
-export function validateMigrationTables(tables: readonly string[], count: 1 | 2): void {
-  const expected = ['User', 'Session', '_prisma_migrations', ...(count === 2 ? ['JobApplication'] : [])];
+export function validateMigrationTables(tables: readonly string[], count: 1 | 2 | 3): void {
+  const expected = ['User', 'Session', '_prisma_migrations', ...(count >= 2 ? ['JobApplication'] : []),
+    ...(count === 3 ? ['ApplicationStatusHistory'] : [])];
   if (tables.length !== expected.length || new Set(tables).size !== tables.length
     || tables.some((table) => !expected.includes(table))) fail('Applied schema has missing or unexpected tables; stop for review.');
+}
+
+// Exact vocabulary for this one offline diff; no arbitrary additive SQL accepted.
+export const statusHistoryDiff = `ALTER TABLE "JobApplication" ADD COLUMN "version" INTEGER NOT NULL DEFAULT 1;
+CREATE TABLE "ApplicationStatusHistory" (
+ "id" UUID NOT NULL,
+ "applicationId" UUID NOT NULL,
+ "fromStatus" "ApplicationStatus" NOT NULL,
+ "toStatus" "ApplicationStatus" NOT NULL,
+ "applicationVersion" INTEGER NOT NULL,
+ "changedAt" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ CONSTRAINT "ApplicationStatusHistory_pkey" PRIMARY KEY ("id")
+);
+CREATE UNIQUE INDEX "ApplicationStatusHistory_applicationId_applicationVersion_key" ON "ApplicationStatusHistory"("applicationId", "applicationVersion");
+ALTER TABLE "ApplicationStatusHistory" ADD CONSTRAINT "ApplicationStatusHistory_applicationId_fkey" FOREIGN KEY ("applicationId") REFERENCES "JobApplication"("id") ON DELETE RESTRICT ON UPDATE CASCADE;`;
+
+export function wrapStatusHistoryDiff(sql: string): string {
+  const normalize = (value: string) => value.replace(/--[^\r\n]*/g, '').replace(/\s+/g, ' ').trim();
+  if (normalize(sql) !== normalize(statusHistoryDiff)) fail('Unexpected history diff; only the exact version/history operations are allowed.');
+  return `BEGIN;\n\n${sql.trim().replace(/\r\n/g, '\n')}\n\n-- Foundation constraints; no synthetic history or data updates.\n`
+    + 'ALTER TABLE "JobApplication" ADD CONSTRAINT "JobApplication_version_positive_check"\nCHECK ("version" > 0);\n\n'
+    + 'ALTER TABLE "ApplicationStatusHistory" ADD CONSTRAINT "ApplicationStatusHistory_status_changed_check"\nCHECK ("fromStatus" <> "toStatus");\n\n'
+    + 'ALTER TABLE "ApplicationStatusHistory" ADD CONSTRAINT "ApplicationStatusHistory_version_check"\nCHECK ("applicationVersion" >= 2);\n\nCOMMIT;\n';
 }
 
 // A deliberately fixed vocabulary for the installed engine's schema-to-schema

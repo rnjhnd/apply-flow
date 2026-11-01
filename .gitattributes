@@ -1,0 +1,3 @@
+# Preserve exact SHA-256 bytes for the new Stage 3C migration foundation.
+apps/api/prisma/baselines/0002_job_applications.prisma text eol=lf
+apps/api/prisma/migrations/0003_application_status_history/migration.sql text eol=lf
