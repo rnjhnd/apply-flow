@@ -12,7 +12,8 @@ import {
 import { loadLocalEnvironment, localEnvPath } from '../src/config/load-env.js';
 import { assertDeploymentApproval, applicationBaselineChecksum, applicationChecksum, baselineChecksum, initialChecksum, migrationChain,
   sqlDigest, validateMigrationDirectory, validateMigrationHistory, validateMigrationTables,
-  verifyMigrationFiles, wrapApplicationDiff, wrapStatusHistoryDiff, type MigrationHistoryRow } from './migration-policy.js';
+  verifyMigrationFiles, wrapApplicationDiff, wrapStatusHistoryDiff, wrapLifecycleDiff,
+  type MigrationCount, type MigrationHistoryRow } from './migration-policy.js';
 
 const apiRoot = fileURLToPath(new URL('../', import.meta.url));
 const repositoryRoot = resolve(apiRoot, '../..');
@@ -156,7 +157,28 @@ async function createStatusHistoryMigration(args: string[]): Promise<void> {
   console.info(sql);
 }
 
-async function inspectMigrationState(target: DatabaseTargetName): Promise<1 | 2 | 3> {
+async function createLifecycleMigration(args: string[]): Promise<void> {
+  if (args.length !== 2 || args[0] !== '--name' || args[1] !== 'application_lifecycle') {
+    throw new DatabaseConfigurationError('This offline generator requires --name application_lifecycle.');
+  }
+  // File verification deliberately permits REVIEW_PENDING; execution approval
+  // is a separate guard. The exact three-migration prefix forbids overwrites.
+  await verifyMigrationFiles(3);
+  const baselinePath = join(apiRoot, 'prisma/baselines/0003_application_status_history.prisma');
+  const directory = join(migrationsRoot, '0004_application_lifecycle');
+  const output = join(directory, 'migration.sql');
+  await mkdir(directory, { recursive: false });
+  prisma(['migrate', 'diff', '--from-schema', baselinePath, '--to-schema', join(apiRoot, 'prisma/schema.prisma'), '--script', '--output', output]);
+  if (!existsSync(output)) throw new DatabaseConfigurationError('Offline lifecycle diff output missing; no retry or cleanup attempted.');
+  const sql = wrapLifecycleDiff(await readFile(output, 'utf8'));
+  await writeFile(output, sql, { encoding: 'utf8', flag: 'w' });
+  console.info(`Generated ${output}`);
+  console.info(`SQL SHA-256: ${sqlDigest(await readFile(output))}`);
+  console.info('REVIEW_PENDING: Separate approval of the exact SQL is required before any deployment or integration run.');
+  console.info(sql);
+}
+
+async function inspectMigrationState(target: DatabaseTargetName): Promise<MigrationCount> {
   const { openLocalDatabase } = await import('../src/db/client.js');
   const { client } = await openLocalDatabase(target, process.env);
   try {
@@ -186,8 +208,8 @@ async function applyApprovedMigration(target: DatabaseTargetName, args: string[]
     console.info('The exact reviewed migration chain is already applied; no changes made.');
     return;
   }
-  if (before !== 2) {
-    throw new DatabaseConfigurationError('Third migration deployment requires exactly the completed 0001 + 0002 prefix; no earlier migration is authorized by this checksum.');
+  if (before !== 3) {
+    throw new DatabaseConfigurationError('Fourth migration deployment requires exactly the completed 0001 + 0002 + 0003 prefix; no earlier migration is authorized by this checksum.');
   }
   await verifyMigrationFiles();
   prisma(['migrate', 'deploy'], target);
@@ -205,6 +227,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     return;
   }
   if (command === 'migrate:create') {
+    if (args[1] === 'application_lifecycle') return createLifecycleMigration(args);
     return args[1] === 'application_status_history' ? createStatusHistoryMigration(args) : createApplicationMigration(args);
   }
   // Approval denial must precede environment loading and all live construction.

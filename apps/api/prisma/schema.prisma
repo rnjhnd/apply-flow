@@ -59,6 +59,7 @@ model JobApplication {
   updatedAt       DateTime          @updatedAt @db.Timestamptz(3)
   // Positive-version CHECK is maintained in 0003_application_status_history.
   version         Int              @default(1)
+  archivedAt      DateTime?         @db.Timestamptz(3)
   user            User              @relation(fields: [userId], references: [id], onDelete: Restrict)
   statusHistory   ApplicationStatusHistory[]
 

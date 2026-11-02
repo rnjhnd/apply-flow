@@ -12,12 +12,16 @@ export const baselineChecksum = '043b3e43163c7aa05f09be3d3a3dabd5e9698418bca265c
 export const applicationChecksum = '74e056f699c2781c01f12d3195ed119074d5b0d4d04fef979c185e17d775a333';
 export const applicationBaselineChecksum = '3d348c49d8756fa6d43372118f654ab4c45e8b87a9e96d86671ffaa03ec36521';
 export const historyChecksum = '7e607ec39d1c278e12bb6db8c5895f23d69ea3e695bd72519e96a34e9c93d85e';
+export const historyBaselineChecksum = '3cee89893fdea259cd3dfcbae5b85939508c01f646866d68adedc31e05d87229';
+export const lifecycleChecksum = 'cfa58ef4e3bbe91b5271291033ef33412194e2ce8dba91071047982f42dcda8c';
+export type MigrationCount = 1 | 2 | 3 | 4;
 export const migrationChain: readonly MigrationSpec[] = Object.freeze([
   Object.freeze({ name: '0001_init_auth', sha256: initialChecksum, approval: 'APPROVED' as const }),
   // Exact reviewed source only. Executing SQL against either target still
   // requires separate explicit authorization; this manifest does not grant it.
   Object.freeze({ name: '0002_job_applications', sha256: applicationChecksum, approval: 'APPROVED' as const }),
-  Object.freeze({ name: '0003_application_status_history', sha256: historyChecksum, approval: 'APPROVED' as const })
+  Object.freeze({ name: '0003_application_status_history', sha256: historyChecksum, approval: 'APPROVED' as const }),
+  Object.freeze({ name: '0004_application_lifecycle', sha256: lifecycleChecksum, approval: 'APPROVED' as const })
 ]);
 export const prismaRoot = fileURLToPath(new URL('../prisma/', import.meta.url));
 export const migrationsRoot = fileURLToPath(new URL('../prisma/migrations/', import.meta.url));
@@ -25,21 +29,22 @@ export function sqlDigest(bytes: Uint8Array | string): string { return createHas
 function fail(message: string): never { throw new DatabaseConfigurationError(message); }
 
 export function assertApprovedChain(chain: readonly MigrationSpec[] = migrationChain): void {
-  if (chain.length !== 3 || chain[0]?.name !== '0001_init_auth' || chain[0].sha256 !== initialChecksum
+  if (chain.length !== 4 || chain[0]?.name !== '0001_init_auth' || chain[0].sha256 !== initialChecksum
     || chain[1]?.name !== '0002_job_applications' || chain[1].sha256 !== applicationChecksum
-    || chain[2]?.name !== '0003_application_status_history' || chain[2].sha256 !== historyChecksum) fail('Unexpected migration-chain definition.');
+    || chain[2]?.name !== '0003_application_status_history' || chain[2].sha256 !== historyChecksum
+    || chain[3]?.name !== '0004_application_lifecycle' || chain[3].sha256 !== lifecycleChecksum) fail('Unexpected migration-chain definition.');
   if (chain.some((entry) => entry.approval !== 'APPROVED')) fail('Migration approval is REVIEW_PENDING; no database connection or deployment is permitted.');
   if (chain.some((entry) => !entry.sha256 || !/^[a-f0-9]{64}$/.test(entry.sha256) || entry.sha256.length !== 64)) fail('Missing or malformed approved migration digest.');
 }
 
 export function assertDeploymentApproval(args: readonly string[], chain: readonly MigrationSpec[] = migrationChain): void {
   assertApprovedChain(chain);
-  if (args.length !== 2 || args[0] !== '--approved-sql-sha256' || args[1] !== chain[2]?.sha256) {
-    fail('Explicit approval of the exact third migration SQL digest is required.');
+  if (args.length !== 2 || args[0] !== '--approved-sql-sha256' || args[1] !== chain[3]?.sha256) {
+    fail('Explicit approval of the exact fourth migration SQL digest is required.');
   }
 }
 
-export function validateMigrationDirectory(names: readonly string[], generated: boolean | 1 | 2 | 3): void {
+export function validateMigrationDirectory(names: readonly string[], generated: boolean | MigrationCount): void {
   // Boolean compatibility is restricted to the historical 0002 offline generator.
   const count = typeof generated === 'boolean' ? generated ? 2 : 1 : generated;
   const expected = ['migration_lock.toml', ...migrationChain.slice(0, count).map(entry => entry.name)];
@@ -47,15 +52,15 @@ export function validateMigrationDirectory(names: readonly string[], generated: 
     || names.some((name) => !expected.includes(name))) fail('Missing or unexpected migration files; no overwrite or recovery was attempted.');
 }
 
-export async function verifyMigrationFiles(): Promise<void> {
+export async function verifyMigrationFiles(count: 3 | 4 = 4): Promise<void> {
   const entries = await readdir(migrationsRoot, { withFileTypes: true });
-  validateMigrationDirectory(entries.map((entry) => entry.name), 3);
+  validateMigrationDirectory(entries.map((entry) => entry.name), count);
   for (const entry of entries) {
     if (entry.isSymbolicLink() || (entry.name === 'migration_lock.toml' ? !entry.isFile() : !entry.isDirectory())) {
       fail('Unexpected migration file type.');
     }
   }
-  for (const entry of migrationChain) {
+  for (const entry of migrationChain.slice(0, count)) {
     const bytes = await readFile(new URL(`../prisma/migrations/${entry.name}/migration.sql`, import.meta.url));
     if (!entry.sha256 || sqlDigest(bytes) !== entry.sha256) fail('Local migration bytes do not match the pinned digest.');
   }
@@ -63,6 +68,8 @@ export async function verifyMigrationFiles(): Promise<void> {
   if (sqlDigest(baseline) !== baselineChecksum) fail('Frozen authentication schema does not match the reviewed baseline.');
   const applicationBaseline = await readFile(new URL('../prisma/baselines/0002_job_applications.prisma', import.meta.url));
   if (sqlDigest(applicationBaseline) !== applicationBaselineChecksum) fail('Frozen application schema does not match the pinned baseline.');
+  const historyBaseline = await readFile(new URL('../prisma/baselines/0003_application_status_history.prisma', import.meta.url));
+  if (sqlDigest(historyBaseline) !== historyBaselineChecksum) fail('Frozen history schema does not match the pinned baseline.');
 }
 
 const historyRow = z.strictObject({
@@ -75,13 +82,13 @@ export type MigrationHistoryRow = z.infer<typeof historyRow>;
 // execution order; a shuffled SELECT result must not conceal reordered execution.
 export function validateMigrationHistory(input: unknown, options: {
   allowInitialPrefix?: boolean; chain?: readonly MigrationSpec[];
-} = {}): 1 | 2 | 3 {
+} = {}): MigrationCount {
   const chain = options.chain ?? migrationChain;
   assertApprovedChain(chain);
   const parsed = z.array(historyRow).safeParse(input);
   if (!parsed.success) fail('Malformed or incomplete migration history.');
   const rows = parsed.data;
-  if (rows.length !== 3 && !(options.allowInitialPrefix && (rows.length === 1 || rows.length === 2))) fail('Missing or extra migration history.');
+  if (rows.length !== 4 && !(options.allowInitialPrefix && (rows.length === 1 || rows.length === 2 || rows.length === 3))) fail('Missing or extra migration history.');
   if (new Set(rows.map((row) => row.migration_name)).size !== rows.length) fail('Duplicate migration history.');
   let previousFinished: number | undefined;
   for (const expected of chain.slice(0, rows.length)) {
@@ -90,14 +97,23 @@ export function validateMigrationHistory(input: unknown, options: {
       || (previousFinished !== undefined && row.started_at.getTime() < previousFinished)) fail('Conflicting or reordered migration history.');
     previousFinished = row.finished_at.getTime();
   }
-  return rows.length as 1 | 2 | 3;
+  return rows.length as MigrationCount;
 }
 
-export function validateMigrationTables(tables: readonly string[], count: 1 | 2 | 3): void {
+export function validateMigrationTables(tables: readonly string[], count: MigrationCount): void {
   const expected = ['User', 'Session', '_prisma_migrations', ...(count >= 2 ? ['JobApplication'] : []),
-    ...(count === 3 ? ['ApplicationStatusHistory'] : [])];
+    ...(count >= 3 ? ['ApplicationStatusHistory'] : [])];
   if (tables.length !== expected.length || new Set(tables).size !== tables.length
     || tables.some((table) => !expected.includes(table))) fail('Applied schema has missing or unexpected tables; stop for review.');
+}
+
+// This checkpoint permits one nullable column only: no defaults, data writes,
+// index/FK changes, or status-history changes can pass the offline diff guard.
+export const lifecycleDiff = 'ALTER TABLE "JobApplication" ADD COLUMN "archivedAt" TIMESTAMPTZ(3);';
+export function wrapLifecycleDiff(sql: string): string {
+  const normalize = (value: string) => value.replace(/--[^\r\n]*/g, '').replace(/\s+/g, ' ').trim();
+  if (normalize(sql) !== lifecycleDiff) fail('Unexpected lifecycle diff; only the nullable archive column is allowed.');
+  return `BEGIN;\n\n${sql.trim().replace(/\r\n/g, '\n')}\n\nCOMMIT;\n`;
 }
 
 // Exact vocabulary for this one offline diff; no arbitrary additive SQL accepted.
