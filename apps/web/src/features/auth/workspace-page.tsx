@@ -4,16 +4,16 @@ import { AuthRoute } from './auth-route';
 import { useAuthAdmission } from './auth-admission';
 import { useAuth } from './use-auth';
 import { useAuthOperation } from './use-auth-operation';
-import { useLocation } from 'react-router';
 import { useEffect, useState } from 'react';
 import { createApplicationsApi } from '../../lib/applications/api';
 import { ApplicationForm } from '../applications/application-form';
 import { ApplicationList } from '../applications/application-list';
 import { useApplications, type ApplicationsController } from '../applications/use-applications';
+import { useApplicationEditor, type ApplicationEditorController } from '../applications/use-application-editor';
+import { ApplicationEditor } from '../applications/application-editor';
 
 export function WorkspacePage() {
-  const location = useLocation();
-  return <WorkspacePageContent key={location.key} />;
+  return <WorkspacePageContent />;
 }
 
 function WorkspacePageContent() {
@@ -21,13 +21,15 @@ function WorkspacePageContent() {
   const { integration } = useAuth();
   const [api] = useState(() => createApplicationsApi(integration.store));
   const applications = useApplications(integration.store, api);
+  const editor = useApplicationEditor(integration.store, api, applications.replaceItem);
   return <AuthRoute kind="protected" feedback={<AuthFeedback feedback={operation.feedback} />}
-    pendingLabel={operation.pending ? 'Signing out' : applications.saving ? 'Saving your application' : undefined}>
-    <WorkspaceView applications={applications} logout={(canSubmit) => operation.start('logout', canSubmit)} />
+    pendingLabel={operation.pending ? 'Signing out' : applications.saving || editor.saving ? 'Saving your application' : undefined}>
+    <WorkspaceView applications={applications} editor={editor} logout={(canSubmit) => operation.start('logout', canSubmit)} />
   </AuthRoute>;
 }
 
-function WorkspaceView({ logout, applications }: { logout: (canSubmit: () => boolean) => void; applications: ApplicationsController }) {
+function WorkspaceView({ logout, applications, editor }: { logout: (canSubmit: () => boolean) => void; applications: ApplicationsController;
+  editor: ApplicationEditorController }) {
   const admission = useAuthAdmission();
   const { state } = useAuth();
   const enter = applications.enter;
@@ -46,10 +48,10 @@ function WorkspaceView({ logout, applications }: { logout: (canSubmit: () => boo
       {applications.cooldown > 0 && <p aria-live="off">Try again in {applications.cooldown} seconds.</p>}
     </div>}
     <div className="grid min-w-0 gap-12 border-t border-border pt-8 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] lg:gap-16">
-      <ApplicationForm controller={applications} />
-      <ApplicationList controller={applications} />
+      {editor.selectedId ? <ApplicationEditor controller={editor} /> : <ApplicationForm controller={applications} />}
+      <ApplicationList controller={applications} onEdit={editor.open} selectedId={editor.selectedId} editBusy={editor.saving || editor.loading || editor.historyLoading} />
     </div>
-    <Button variant="outline" disabled={!admission.allowed} onClick={() => logout(admission.canSubmit)}>Sign out</Button>
+    <Button variant="outline" disabled={!admission.allowed || editor.saving} onClick={() => { if (editor.confirmLeave()) logout(admission.canSubmit); }}>Sign out</Button>
     <p className="text-xs leading-6 text-muted-foreground">Signing out ends this browser’s current session. Your other devices stay signed in.</p>
   </section>;
 }

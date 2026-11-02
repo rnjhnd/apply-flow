@@ -1,13 +1,10 @@
 import { useRef, useState } from 'react';
-import { applicationStatusSchema, createApplicationRequestSchema } from '@applyflow/contracts';
+import { createApplicationRequestSchema } from '@applyflow/contracts';
 import { Button } from '../../components/ui/button';
 import { useAuthAdmission } from '../auth/auth-admission';
-import { fieldClass } from '../auth/password-field';
 import type { ApplicationsController, ApplicationDraft } from './use-applications';
-
-const fields = ['company', 'jobTitle', 'status', 'applicationDate', 'location', 'jobUrl', 'notes'] as const;
-const labels = { company: 'Company', jobTitle: 'Job title', status: 'Status', applicationDate: 'Application date',
-  location: 'Location', jobUrl: 'Job URL', notes: 'Notes' };
+import { ApplicationFields } from './application-fields';
+import { applicationFields as fields, applicationLabels as labels } from './application-field-policy';
 
 export function ApplicationForm({ controller }: { controller: ApplicationsController }) {
   const admission = useAuthAdmission();
@@ -32,22 +29,8 @@ export function ApplicationForm({ controller }: { controller: ApplicationsContro
     }}>
       {Object.keys(errors).length > 0 && <p ref={summary} role="alert" tabIndex={-1} className="border-l-2 border-primary pl-3 text-sm outline-offset-4 focus-visible:outline-2">Please review the fields below. Your application has not been sent.</p>}
       <fieldset className="min-w-0 space-y-5 border-0 p-0" disabled={!admission.allowed || controller.saving || controller.cooldown > 0}>
-        {fields.map(key => {
-          const error = errors[key] ?? (controller.failure?.fields?.[key] ? 'Review this field.' : undefined);
-          const id = `application-${key}`;
-          const common = { id, name: key, value: controller.draft[key], className: fieldClass,
-            'aria-invalid': error ? true as const : undefined, 'aria-describedby': error ? `${id}-error` : key === 'applicationDate' ? 'application-date-hint' : undefined,
-            onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => controller.setDraft(previous => ({ ...previous, [key]: event.target.value })) };
-          return <div key={key} className="min-w-0 space-y-2">
-            <label htmlFor={id} className="block text-sm font-semibold">{labels[key]}{['location', 'jobUrl', 'notes'].includes(key) ? ' (optional)' : ''}</label>
-            {key === 'status' ? <select {...common}>{applicationStatusSchema.options.map(status => <option key={status} value={status}>{status.charAt(0) + status.slice(1).toLowerCase()}</option>)}</select>
-              : key === 'notes' ? <textarea {...common} rows={5} />
-              : <input {...common} type={key === 'applicationDate' ? 'date' : key === 'jobUrl' ? 'url' : 'text'}
-                required={key === 'company' || key === 'jobTitle' || (key === 'applicationDate' && controller.draft.status !== 'SAVED')} />}
-            {key === 'applicationDate' && <p id="application-date-hint" className="text-xs leading-5 text-muted-foreground">Optional for Saved; required for every other status. Future dates cannot be saved.</p>}
-            {error && <p id={`${id}-error`} className="text-sm font-medium">{error}</p>}
-          </div>;
-        })}
+        <ApplicationFields prefix="application" draft={controller.draft} setDraft={controller.setDraft}
+          errors={{ ...Object.fromEntries(Object.keys(controller.failure?.fields ?? {}).map(key => [key, 'Review this field.'])), ...errors }} />
         <Button type="submit" className="w-full sm:w-auto">Save application</Button>
       </fieldset>
     </form>

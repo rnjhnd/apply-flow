@@ -53,6 +53,13 @@ describe('page-owned application lifecycle', () => {
     await act(async () => { gate.resolve({ items: [row, { ...row, id: user.id, company: 'Second' }], nextCursor: null }); });
     expect(f.result.current.items.map(item => item.company)).toEqual(['Acme','Second']); expect(f.result.current.nextCursor).toBeNull();
   });
+  it('replaces only a saved loaded item without changing pagination or unrelated entries', async () => {
+    const f = await fixture(); f.api.list.mockResolvedValue({ items: [row, { ...row, id: user.id, company: 'Other' }], nextCursor: 'cursor' });
+    await act(async () => { f.result.current.enter(); });
+    act(() => f.result.current.replaceItem({ ...row, company: 'Edited', version: 2 }));
+    expect(f.result.current.items.map(item => item.company)).toEqual(['Edited','Other']); expect(f.result.current.nextCursor).toBe('cursor');
+    expect(f.api.list).toHaveBeenCalledOnce();
+  });
   it('blocks programmatic submission without current route admission', async () => {
     const f = await fixture(); act(() => f.result.current.save(input, () => false)); expect(f.api.create).not.toHaveBeenCalled();
   });

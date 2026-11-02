@@ -173,3 +173,97 @@ describe('list authority independent of broadcast delivery', () => {
     finally { f.dispose(); }
   });
 });
+
+const editInput = { company: 'Acme', jobTitle: 'Engineer', status: 'SAVED', applicationDate: null,
+  location: null, jobUrl: null, notes: null, expectedVersion: 1 };
+const event = { id: user.id, fromStatus: 'SAVED', toStatus: 'APPLIED', applicationVersion: 2, changedAt: dto.createdAt };
+describe('typed edit/history transport', () => {
+  it('reads fresh details and sends a complete normalized PUT with private CSRF and no abort/replay', async () => {
+    const f = await fixture();
+    try {
+      f.fetcher.mockResolvedValueOnce(json({ application: dto })).mockResolvedValueOnce(json({ application: { ...dto, version: 2 } }));
+      await f.api.get(dto.id); await f.api.update(dto.id, { ...editInput, company: ' Acme ' });
+      expect(f.fetcher.mock.calls[0]).toEqual([`/api/applications/${dto.id}`, expect.objectContaining({ method: 'GET', headers: { 'X-ApplyFlow-Request': '1' } })]);
+      const options = f.fetcher.mock.calls[1]![1]!;
+      expect(options).toMatchObject({ method: 'PUT', credentials: 'same-origin', cache: 'no-store', redirect: 'error', headers: { 'X-CSRF-Token': proof } });
+      expect(JSON.parse(options.body as string)).toEqual(editInput); expect(options).not.toHaveProperty('signal');
+      expect(JSON.stringify(f.auth.store.getSnapshot())).not.toContain(proof);
+    } finally { f.auth.store.dispose(); }
+  });
+  it('rejects invalid IDs and incomplete or injected updates before dispatch', async () => {
+    const f = await fixture();
+    try {
+      for (const operation of [() => f.api.get('invalid'), () => f.api.update('invalid', editInput), () => f.api.history('invalid')])
+        await expect(operation()).rejects.toMatchObject({ kind: 'validation' });
+      const incomplete = { ...editInput } as Partial<typeof editInput>; delete incomplete.notes;
+      for (const input of [incomplete, { ...editInput, userId: user.id }, { ...editInput, version: 10 }, { ...editInput, expectedVersion: 0 }])
+        await expect(f.api.update(dto.id, input)).rejects.toMatchObject({ kind: 'validation' });
+      expect(f.fetcher).not.toHaveBeenCalled();
+    } finally { f.auth.store.dispose(); }
+  });
+  it('retains only the validated conflict code and sanitized field errors', async () => {
+    const f = await fixture();
+    try {
+      f.fetcher.mockResolvedValue(json({ code: 'APPLICATION_CONFLICT', message: 'PRIVATE' }, 409));
+      const error = await f.api.update(dto.id, editInput).catch(value => value);
+      expect(error).toMatchObject({ kind: 'http', status: 409, code: 'APPLICATION_CONFLICT' });
+      expect(JSON.stringify(error)).not.toContain('PRIVATE'); expect(f.fetcher).toHaveBeenCalledOnce();
+    } finally { f.auth.store.dispose(); }
+  });
+  it.each(['network','malformed','server'] as const)('never replays a %s uncertain PUT', async kind => {
+    const f = await fixture();
+    try {
+      if (kind === 'network') f.fetcher.mockRejectedValue(new Error('PRIVATE'));
+      else f.fetcher.mockResolvedValue(kind === 'server' ? json({ code: 'SERVICE_UNAVAILABLE', message: 'PRIVATE' }, 503) : json({ application: { ...dto, userId: user.id } }));
+      const error = await f.api.update(dto.id, editInput).catch(value => value);
+      expect(error).toMatchObject({ kind: 'unknown' }); expect(JSON.stringify(error)).not.toContain('PRIVATE'); expect(f.fetcher).toHaveBeenCalledOnce();
+    } finally { f.auth.store.dispose(); }
+  });
+  it('rejects wrong-application success responses', async () => {
+    const f = await fixture();
+    try {
+      f.fetcher.mockResolvedValue(json({ application: { ...dto, id: user.id } }));
+      await expect(f.api.get(dto.id)).rejects.toMatchObject({ kind: 'unknown' });
+      await expect(f.api.update(dto.id, editInput)).rejects.toMatchObject({ kind: 'unknown' });
+    } finally { f.auth.store.dispose(); }
+  });
+  it('uses canonical revision cursors, default limit, and cancellable proof-free history reads', async () => {
+    const f = await fixture(); const abort = new AbortController();
+    try {
+      f.fetcher.mockResolvedValue(json({ items: [event], nextCursor: null }));
+      expect((await f.api.history(dto.id, { cursor: '4' }, abort.signal)).items).toHaveLength(1);
+      expect(f.fetcher).toHaveBeenCalledWith(`/api/applications/${dto.id}/history?limit=20&cursor=4`, expect.objectContaining({ signal: abort.signal, method: 'GET', headers: { 'X-ApplyFlow-Request': '1' } }));
+      await expect(f.api.history(dto.id, { cursor: '04' })).rejects.toMatchObject({ kind: 'validation' });
+      await expect(f.api.history(dto.id, { limit: 51 })).rejects.toMatchObject({ kind: 'validation' });
+      expect(f.fetcher).toHaveBeenCalledOnce();
+    } finally { f.auth.store.dispose(); }
+  });
+  it.each([
+    { items: [{ ...event, applicationVersion: 3 }, event], nextCursor: '3' },
+    { items: [event, { ...event, id: dto.id, applicationVersion: 4 }], nextCursor: null },
+    { items: [event, event], nextCursor: null },
+    { items: [], nextCursor: '2' }
+  ])('rejects nonprogressing, duplicate or unordered history responses', async body => {
+    const f = await fixture();
+    try { f.fetcher.mockResolvedValue(json(body)); await expect(f.api.history(dto.id)).rejects.toMatchObject({ kind: 'unknown' }); }
+    finally { f.auth.store.dispose(); }
+  });
+  it.each(['get','history','update'] as const)('does not dispatch %s under a replaced account', async operation => {
+    const f = await fixture();
+    try {
+      f.auth.api.me.mockResolvedValue({ user: { ...user, id: dto.id } });
+      const result = operation === 'update' ? f.api.update(dto.id, editInput) : f.api[operation](dto.id);
+      await expect(result).rejects.toMatchObject({ kind: 'stale' }); expect(f.fetcher).not.toHaveBeenCalled();
+    } finally { f.auth.store.dispose(); }
+  });
+  it.each([401,403])('reconciles rejected edit/history %i without replay', async status => {
+    for (const operation of ['get','history','update'] as const) {
+      const f = await fixture();
+      try {
+        f.fetcher.mockResolvedValue(json({ code: status === 401 ? 'UNAUTHENTICATED' : 'REQUEST_REJECTED', message: 'Rejected.' }, status));
+        await expect(operation === 'update' ? f.api.update(dto.id, editInput) : f.api[operation](dto.id)).rejects.toMatchObject({ status });
+        expect(f.fetcher).toHaveBeenCalledOnce(); expect(f.auth.store.getSnapshot().outcomeUncertain).toBe(false);
+      } finally { f.auth.store.dispose(); }
+    }
+  });
+});

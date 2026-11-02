@@ -8,7 +8,7 @@ export type ApplicationDraft = { company: string; jobTitle: string; status: stri
 const emptyDraft: ApplicationDraft = { company: '', jobTitle: '', status: 'SAVED', applicationDate: '', location: '', jobUrl: '', notes: '' };
 
 // The page owns drafts and outcomes above temporarily unmounted protected content.
-export function useApplications(store: AuthStore, api: ApplicationsApi) {
+export function useApplications(store: AuthStore, api: Pick<ApplicationsApi, 'create' | 'list'>) {
   const [draft, setDraft] = useState<ApplicationDraft>({ ...emptyDraft });
   const [items, setItems] = useState<Application[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -99,6 +99,7 @@ export function useApplications(store: AuthStore, api: ApplicationsApi) {
     }).finally(() => { if (current()) { owner.saving = false; setSaving(false); } });
   }
   return { draft, setDraft, items, nextCursor, loading, saving, listError, failure, message, enter, save,
+    replaceItem: (application: Application) => { if (admitted()) setItems(previous => previous.map(item => item.id === application.id ? application : item)); },
     cooldown: failure?.retryAt ? Math.max(0, Math.ceil((failure.retryAt - time) / 1000)) : 0,
     refresh: () => load(), loadMore: () => { if (nextCursor) load(nextCursor); } };
 }
