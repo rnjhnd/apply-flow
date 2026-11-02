@@ -10,6 +10,13 @@ import { AuthRoute } from './auth-route';
 import { useAuth } from './use-auth';
 import { App } from '../../App';
 
+// Isolate the feature's additional session preflight from the established auth
+// receipt/request-count assertions; real feature integration has its own tests.
+vi.mock('../../lib/applications/api', async importOriginal => ({
+  ...await importOriginal<typeof import('../../lib/applications/api')>(),
+  createApplicationsApi: () => ({ list: vi.fn().mockResolvedValue({ items: [], nextCursor: null }), create: vi.fn() })
+}));
+
 const fixtures: ReturnType<typeof authFixture>[] = [];
 function fixture(options: Parameters<typeof authFixture>[0] = {}) {
   const setup = authFixture(options); fixtures.push(setup); return setup;

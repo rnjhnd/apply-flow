@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { assertDatabaseIdentity, requireTestDatabaseTarget } from '../src/config/database.js';
 import { loadLocalEnvironment } from '../src/config/load-env.js';
@@ -8,6 +7,7 @@ import { createSessionService, ABSOLUTE_LIFETIME_MS, ANONYMOUS_LIFETIME_MS, IDLE
   type SessionDatabase } from '../src/modules/auth/sessions.js';
 import type { Session } from '../src/generated/prisma/client.ts';
 import { createPasswordService } from '../src/modules/auth/passwords.js';
+import { assertApprovedChain, verifyMigrationFiles, validateMigrationHistory, type MigrationHistoryRow } from '../scripts/migration-policy.js';
 
 const prefix = `checkpoint2b-${randomUUID()}-`;
 const ownedSessions = new Set<string>();
@@ -33,14 +33,13 @@ async function remember(pending: Promise<{ token: string; session: Session }>) {
 beforeAll(async () => {
   loadLocalEnvironment();
   requireTestDatabaseTarget(process.env);
-  const sqlHash = createHash('sha256').update(readFileSync(new URL('../prisma/migrations/0001_init_auth/migration.sql', import.meta.url))).digest('hex');
-  expect(sqlHash).toBe('98fab302c1f9d6a053d549bdbb9aec2bece4e24322fb1292948647ed693ac840');
+  assertApprovedChain();
+  await verifyMigrationFiles();
   connection = await openLocalDatabase('test', process.env);
-  const history = await client().$queryRaw<Array<{ checksum: string; finished_at: Date | null; rolled_back_at: Date | null }>>`
-    SELECT checksum, finished_at, rolled_back_at FROM public._prisma_migrations
+  const history = await client().$queryRaw<MigrationHistoryRow[]>`
+    SELECT migration_name, checksum, started_at, finished_at, rolled_back_at, applied_steps_count, logs FROM public._prisma_migrations
   `;
-  expect(history).toHaveLength(1);
-  expect(history[0]).toMatchObject({ checksum: sqlHash, finished_at: expect.any(Date), rolled_back_at: null });
+  validateMigrationHistory(history);
   // Keep every test clock (including +7-day boundary tests) earlier than all pre-existing timestamps.
   // Global expired-session queries can therefore select only this suite's fixtures.
   const earliest = await client().$queryRaw<Array<{ earliest: Date | null }>>`

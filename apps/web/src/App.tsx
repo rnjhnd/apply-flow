@@ -5,9 +5,10 @@ import { AuthProvider } from './features/auth/auth-provider';
 import { AuthPage } from './features/auth/auth-page';
 import { WorkspacePage } from './features/auth/workspace-page';
 import { RouteShell } from './features/auth/route-shell';
+import { WorkspaceNavigationProvider } from './features/applications/workspace-navigation-provider';
 
 export function App({ authStore }: { authStore?: AuthStore | undefined }) {
-  return <Routes>
+  return <WorkspaceNavigationProvider><Routes>
     <Route path="/" element={<WelcomePage />} />
     <Route element={<RouteShell />}>
       <Route element={<AuthProvider store={authStore}><Outlet /></AuthProvider>}>
@@ -21,5 +22,5 @@ export function App({ authStore }: { authStore?: AuthStore | undefined }) {
         <Link to="/" className="font-semibold text-primary underline underline-offset-4">Return home</Link>
       </section>} />
     </Route>
-  </Routes>;
+  </Routes></WorkspaceNavigationProvider>;
 }

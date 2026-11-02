@@ -1,12 +1,11 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { assertDatabaseIdentity, requireTestDatabaseTarget } from '../src/config/database.js';
 import { loadLocalEnvironment } from '../src/config/load-env.js';
 import { openLocalDatabase } from '../src/db/client.js';
 import type { Prisma } from '../src/generated/prisma/client.ts';
+import { assertApprovedChain, verifyMigrationFiles, validateMigrationHistory, type MigrationHistoryRow } from '../scripts/migration-policy.js';
 
-const approvedSqlHash = '98fab302c1f9d6a053d549bdbb9aec2bece4e24322fb1292948647ed693ac840';
 const fixturePrefix = `checkpoint2a-${randomUUID()}-`;
 const ownedUserIds = new Set<string>();
 const uuidV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -54,17 +53,14 @@ beforeAll(async () => {
   loadLocalEnvironment();
   // Fail before connecting or writing: no development fallback or NODE_ENV override.
   requireTestDatabaseTarget(process.env);
-  const sql = readFileSync(new URL('../prisma/migrations/0001_init_auth/migration.sql', import.meta.url));
-  expect(createHash('sha256').update(sql).digest('hex')).toBe(approvedSqlHash);
+  assertApprovedChain();
+  await verifyMigrationFiles();
   database = await openLocalDatabase('test', process.env);
-  const history = await testClient().$queryRaw<Array<{
-    migration_name: string; checksum: string; finished_at: Date | null; rolled_back_at: Date | null;
-  }>>`SELECT migration_name, checksum, finished_at, rolled_back_at FROM public._prisma_migrations`;
-  expect(history).toHaveLength(1);
-  expect(history[0]).toMatchObject({
-    migration_name: '0001_init_auth', checksum: approvedSqlHash,
-    finished_at: expect.any(Date), rolled_back_at: null
-  });
+  const history = await testClient().$queryRaw<MigrationHistoryRow[]>`
+    SELECT migration_name, checksum, started_at, finished_at, rolled_back_at, applied_steps_count, logs
+    FROM public._prisma_migrations
+  `;
+  validateMigrationHistory(history);
 });
 
 afterEach(async () => {
