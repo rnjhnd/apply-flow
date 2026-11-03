@@ -2,6 +2,7 @@ import { applicationSchema, createApplicationRequestSchema, createApplicationRes
   listApplicationsQuerySchema, listApplicationsResponseSchema, applicationIdSchema,
   getApplicationResponseSchema, updateApplicationRequestSchema, updateApplicationResponseSchema,
   listApplicationHistoryQuerySchema, listApplicationHistoryResponseSchema,
+  applicationLifecycleRequestSchema, deleteApplicationRequestSchema, deleteApplicationResponseSchema,
   type ApplicationErrorResponse } from '@applyflow/contracts';
 import type { Prisma, Session } from '../../generated/prisma/client.ts';
 import { createSessionService, isSessionValid } from '../auth/sessions.js';
@@ -16,7 +17,7 @@ export type ApplicationDatabase = {
 };
 export type ApplicationProof = { token: string; csrfToken?: string | undefined };
 const selection = { id: true, company: true, jobTitle: true, status: true, applicationDate: true,
-  location: true, jobUrl: true, notes: true, createdAt: true, updatedAt: true, version: true } as const;
+  location: true, jobUrl: true, notes: true, createdAt: true, updatedAt: true, version: true, archivedAt: true } as const;
 type PublicRow = Prisma.JobApplicationGetPayload<{ select: typeof selection }>;
 
 function dto(row: PublicRow) {
@@ -25,7 +26,8 @@ function dto(row: PublicRow) {
     || row.applicationDate.getUTCSeconds() !== 0 || row.applicationDate.getUTCMilliseconds() !== 0)) throw new Error();
   return applicationSchema.parse({ id: row.id, version: row.version, company: row.company, jobTitle: row.jobTitle, status: row.status,
     applicationDate: row.applicationDate?.toISOString().slice(0, 10) ?? null, location: row.location,
-    jobUrl: row.jobUrl, notes: row.notes, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() });
+    jobUrl: row.jobUrl, notes: row.notes, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString(),
+    archivedAt: row.archivedAt === null ? null : row.archivedAt.toISOString() });
 }
 
 const unauthenticated = () => new ApplicationHttpError(401, 'UNAUTHENTICATED', 'A valid authenticated session is required.');
@@ -33,7 +35,7 @@ const notFound = () => new ApplicationHttpError(404, 'NOT_FOUND', 'Application n
 function applicationId(input: unknown) {
   const parsed = applicationIdSchema.safeParse(input);
   if (!parsed.success) throw new ApplicationHttpError(400, 'INVALID_REQUEST', 'Invalid application ID.');
-  return parsed.data;
+  return parsed.data.toLowerCase();
 }
 export function createApplicationService(database: ApplicationDatabase, options: { now: () => Date; timeZone: string }) {
   const datePolicy = createApplicationDatePolicy(options);
@@ -56,7 +58,78 @@ export function createApplicationService(database: ApplicationDatabase, options:
     if (!await createSessionService(transaction, { now: options.now }).refreshAuthenticated(proof.token)) throw unauthenticated();
     return session.userId;
   }
+  async function lockOwned(transaction: ApplicationTransaction, key: string, userId: string) {
+    // All mutations lock Session first, then only the authenticated owner's row.
+    const rows = await transaction.$queryRaw<PublicRow[]>`
+      SELECT id, company, "jobTitle", status, "applicationDate", location, "jobUrl", notes,
+        "createdAt", "updatedAt", version, "archivedAt" FROM public."JobApplication"
+      WHERE id = ${key}::uuid AND "userId" = ${userId}::uuid FOR UPDATE
+    `;
+    if (!rows[0]) throw notFound();
+    return rows[0];
+  }
+  function requireVersion(row: PublicRow, expectedVersion: number) {
+    if (row.version !== expectedVersion) {
+      throw new ApplicationHttpError(409, 'APPLICATION_CONFLICT',
+        'Application changed. Reload it and review your changes before trying again.', undefined, 'STALE_VERSION');
+    }
+  }
+  function requireNextVersion(row: PublicRow) {
+    if (row.version === 2_147_483_647) throw new Error('Application revision exhausted.');
+  }
+  function changeArchive(id: unknown, input: unknown, proof: ApplicationProof, archived: boolean) {
+    return safely(async () => {
+      const key = applicationId(id);
+      const parsed = applicationLifecycleRequestSchema.safeParse(input);
+      if (!parsed.success) throw new ApplicationHttpError(400, 'INVALID_REQUEST', 'A valid expected version is required.');
+      return database.$transaction(async transaction => {
+        const userId = await owner(transaction, proof, true);
+        const previous = await lockOwned(transaction, key, userId);
+        requireVersion(previous, parsed.data.expectedVersion);
+        if ((previous.archivedAt !== null) === archived) {
+          return updateApplicationResponseSchema.parse({ application: dto(previous) });
+        }
+        requireNextVersion(previous);
+        const now = options.now();
+        const archivedAt = archived ? now : null;
+        const row = await transaction.jobApplication.update({ where: { id: key, userId }, data: {
+          archivedAt, version: previous.version + 1, updatedAt: now
+        }, select: selection });
+        if (row.id !== key || row.version !== previous.version + 1 || row.archivedAt?.getTime() !== archivedAt?.getTime()) {
+          throw new Error('Unexpected lifecycle response.');
+        }
+        return updateApplicationResponseSchema.parse({ application: dto(row) });
+      });
+    });
+  }
   return {
+    archive: (id: unknown, input: unknown, proof: ApplicationProof) => changeArchive(id, input, proof, true),
+    restore: (id: unknown, input: unknown, proof: ApplicationProof) => changeArchive(id, input, proof, false),
+    delete(id: unknown, input: unknown, proof: ApplicationProof) {
+      return safely(async () => {
+        const key = applicationId(id);
+        const parsed = deleteApplicationRequestSchema.safeParse(input);
+        if (!parsed.success) throw new ApplicationHttpError(400, 'INVALID_REQUEST', 'A valid expected version and deletion confirmation are required.');
+        return database.$transaction(async transaction => {
+          const userId = await owner(transaction, proof, true);
+          const previous = await lockOwned(transaction, key, userId);
+          requireVersion(previous, parsed.data.expectedVersion);
+          if (previous.archivedAt === null) {
+            throw new ApplicationHttpError(409, 'APPLICATION_CONFLICT', 'Archive this application before permanently deleting it.',
+              undefined, 'APPLICATION_NOT_ARCHIVED');
+          }
+          // Retain ON DELETE RESTRICT: remove only this owned parent's children
+          // before the unique parent delete, within the same transaction.
+          await transaction.applicationStatusHistory.deleteMany({ where: { applicationId: key, application: { userId } } });
+          const row = await transaction.jobApplication.delete({ where: {
+            id: key, userId, version: parsed.data.expectedVersion, archivedAt: { not: null }
+          }, select: { id: true } });
+          const response = deleteApplicationResponseSchema.parse({ deletedApplicationId: row.id });
+          if (response.deletedApplicationId !== key) throw new Error('Unexpected deletion response.');
+          return response;
+        });
+      });
+    },
     get(id: unknown, proof: ApplicationProof) {
       return safely(async () => {
         const key = applicationId(id);
@@ -84,16 +157,11 @@ export function createApplicationService(database: ApplicationDatabase, options:
         if (!policy.valid) throw new ApplicationHttpError(400, 'INVALID_REQUEST', 'Review the application date.', { applicationDate: [policy.message] });
         return database.$transaction(async transaction => {
           const userId = await owner(transaction, proof, true);
-          // Always Session -> owned Application; another owner's row is never locked.
-          const rows = await transaction.$queryRaw<PublicRow[]>`
-            SELECT id, company, "jobTitle", status, "applicationDate", location, "jobUrl", notes,
-              "createdAt", "updatedAt", version FROM public."JobApplication"
-            WHERE id = ${key}::uuid AND "userId" = ${userId}::uuid FOR UPDATE
-          `;
-          const previous = rows[0];
-          if (!previous) throw notFound();
-          if (previous.version !== value.expectedVersion) {
-            throw new ApplicationHttpError(409, 'APPLICATION_CONFLICT', 'Application changed. Reload it and review your changes before saving again.');
+          const previous = await lockOwned(transaction, key, userId);
+          requireVersion(previous, value.expectedVersion);
+          if (previous.archivedAt !== null) {
+            throw new ApplicationHttpError(409, 'APPLICATION_CONFLICT', 'Restore this application before editing it.',
+              undefined, 'APPLICATION_ARCHIVED');
           }
           const current = dto(previous);
           const fields = ['company', 'jobTitle', 'status', 'applicationDate', 'location', 'jobUrl', 'notes'] as const;
@@ -101,7 +169,7 @@ export function createApplicationService(database: ApplicationDatabase, options:
             return updateApplicationResponseSchema.parse({ application: current });
           }
           // Do not overflow PostgreSQL INTEGER or manufacture a wrapped revision.
-          if (previous.version === 2_147_483_647) throw new Error('Application revision exhausted.');
+          requireNextVersion(previous);
           const row = await transaction.jobApplication.update({ where: { id: key, userId }, data: {
             company: value.company, jobTitle: value.jobTitle, status: value.status,
             applicationDate: value.applicationDate === null ? null : new Date(`${value.applicationDate}T00:00:00.000Z`),
@@ -168,11 +236,11 @@ export function createApplicationService(database: ApplicationDatabase, options:
       return safely(async () => {
         const parsed = listApplicationsQuerySchema.safeParse(input);
         if (!parsed.success) throw new ApplicationHttpError(400, 'INVALID_REQUEST', 'Invalid application list query.');
-        const { limit, cursor } = parsed.data;
+        const { limit, cursor, view } = parsed.data;
         const boundary = cursor === undefined ? null : decodeApplicationCursor(cursor);
         return database.$transaction(async transaction => {
           const userId = await owner(transaction, proof, false);
-          const rows = await transaction.jobApplication.findMany({ where: { userId, ...(boundary ? {
+          const rows = await transaction.jobApplication.findMany({ where: { userId, archivedAt: view === 'active' ? null : { not: null }, ...(boundary ? {
             OR: [{ createdAt: { lt: boundary.createdAt } }, { createdAt: boundary.createdAt, id: { lt: boundary.id } }]
           } : {}) }, select: selection, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: limit + 1 });
           const items = rows.slice(0, limit);

@@ -20,7 +20,7 @@ describe('application list presentation', () => {
     expect(screen.getByRole('alert').textContent).toContain('could not be loaded'); fireEvent.click(screen.getByRole('button', { name: 'Refresh applications' })); expect(state.refresh).toHaveBeenCalledOnce();
   });
   it('renders safe text, date-only values, and protected external links', () => {
-    const state = controller({ items: [{ id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, company: '<script>Company</script>', jobTitle: 'Engineer', status: 'APPLIED',
+    const state = controller({ items: [{ id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, archivedAt: null, company: '<script>Company</script>', jobTitle: 'Engineer', status: 'APPLIED',
       applicationDate: '2026-10-22', location: 'Manila', jobUrl: 'https://example.invalid/job', notes: 'First\n  Second',
       createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z' }], nextCursor: 'cursor' });
     const edit = vi.fn(); render(<ApplicationList controller={state} onEdit={edit} />);

@@ -5,22 +5,26 @@ import { parseEnv } from '../../config/env.js';
 import { parseAuthConfig } from '../../config/auth.js';
 import { ApplicationHttpError } from './http-error.js';
 import type { ApplicationService } from './service.js';
+import { AUTH_LIMITS } from '../auth/admission.js';
 
 const token = 'a'.repeat(64), csrf = 'b'.repeat(64), origin = 'http://127.0.0.1:5173';
 function fixture() {
   const service = { create: vi.fn<ApplicationService['create']>().mockResolvedValue({ application: {
-    id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED',
+    id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, archivedAt: null, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED',
     applicationDate: null, location: null, jobUrl: null, notes: null, createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z' } }),
     list: vi.fn<ApplicationService['list']>().mockResolvedValue({ items: [], nextCursor: null }),
     get: vi.fn<ApplicationService['get']>(), update: vi.fn<ApplicationService['update']>(),
-    history: vi.fn<ApplicationService['history']>().mockResolvedValue({ items: [], nextCursor: null }) };
+    history: vi.fn<ApplicationService['history']>().mockResolvedValue({ items: [], nextCursor: null }),
+    archive: vi.fn<ApplicationService['archive']>().mockResolvedValue(applicationResponse()),
+    restore: vi.fn<ApplicationService['restore']>().mockResolvedValue(applicationResponse()),
+    delete: vi.fn<ApplicationService['delete']>().mockResolvedValue({ deletedApplicationId: 'c4974360-a70c-4a29-8b41-df95d15d7270' }) };
   service.get.mockResolvedValue(applicationResponse());
   service.update.mockResolvedValue(applicationResponse());
   const sessions = { findValid: vi.fn(), createAnonymous: vi.fn() };
   return { app: createApp(parseEnv({ NODE_ENV: 'test' }), { config: parseAuthConfig({ NODE_ENV: 'test' }), sessions }, { applications: service }), service, sessions };
 }
 function applicationResponse() {
-  return { application: { id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1,
+  return { application: { id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, archivedAt: null,
     company: 'Acme', jobTitle: 'Engineer', status: 'SAVED' as const, applicationDate: null,
     location: null, jobUrl: null, notes: null, createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z' } };
 }
@@ -84,9 +88,9 @@ describe('protected application HTTP composition (injected service)', () => {
     await request(f.app).put('/api/applications/not-a-uuid').set(headers).send({}).expect(400);
     await request(f.app).get(detail + '?ownerId=x').set(headers).expect(400);
     await request(f.app).put(detail + '?version=1').set(headers).send({}).expect(400);
-    await request(f.app).head(detail).set(headers).expect(405).expect('Allow', 'GET, PUT');
+    await request(f.app).head(detail).set(headers).expect(405).expect('Allow', 'GET, PUT, DELETE');
     await request(f.app).patch(detail).set(headers).send({}).expect(405);
-    await request(f.app).delete(detail).set(headers).expect(405);
+    await request(f.app).delete(detail + '?ownerId=x').set(headers).send({}).expect(400);
     await request(f.app).post(detail + '/history').set(headers).send({}).expect(405).expect('Allow', 'GET');
     await request(f.app).put(detail).set(headers).set('Content-Type', 'text/plain').send('x').expect(415);
     await request(f.app).put(detail).set(headers).set('Content-Type', 'application/json').send('{').expect(400);
@@ -109,5 +113,29 @@ describe('protected application HTTP composition (injected service)', () => {
     const response = await request(f.app).put(detail).set(headers).send({}).expect(409);
     expect(response.body).toEqual({ code: 'APPLICATION_CONFLICT', message: 'Application changed.' });
     expect(response.headers['set-cookie']).toBeUndefined();
+  });
+  it.each(['archive','restore','delete'] as const)('enforces %s HTTP method, UUID, query, JSON and size admission', async operation => {
+    const f = fixture(); const url = operation === 'delete' ? detail : detail + '/' + operation;
+    const send = (path = url) => operation === 'delete' ? request(f.app).delete(path) : request(f.app).post(path);
+    const body = operation === 'delete' ? { expectedVersion: 1, confirmPermanentDeletion: true } : { expectedVersion: 1 };
+    await send().set(headers).set('Content-Type','text/plain').send('x').expect(415);
+    await send().set(headers).set('Content-Type','application/json').send('{').expect(400);
+    await send().set(headers).send({notes:'x'.repeat(17000)}).expect(413);
+    await send(url + '?userId=x').set(headers).send(body).expect(400);
+    await send(url.replace('c4974360-a70c-4a29-8b41-df95d15d7270','invalid')).set(headers).send(body).expect(400);
+    await send().set(headers).set('Cookie',`${headers.Cookie}; ${headers.Cookie}`).send(body).expect(400);
+    await request(f.app).patch(url).set(headers).send(body).expect(405).expect('Allow', operation === 'delete' ? 'GET, PUT, DELETE' : 'POST');
+    if(operation !== 'delete') await request(f.app).get(url).set(headers).expect(405).expect('Allow','POST');
+    expect(f.service[operation]).not.toHaveBeenCalled();
+    const response = await send().set(headers).send(body).expect(200);
+    expect(f.service[operation]).toHaveBeenCalledExactlyOnceWith(detail.split('/').at(-1),body,{token,csrfToken:csrf});
+    expect(response.headers['set-cookie']).toBeUndefined();
+  });
+  it('retains request rate admission before malformed lifecycle JSON or service access',async()=>{
+    const f=fixture();
+    for(let index=0;index<AUTH_LIMITS.requests;index++) await request(f.app).get(detail).set(headers).expect(200);
+    await request(f.app).delete(detail).set(headers).set('Content-Type','application/json').send('{').expect(429)
+      .expect(response=>{expect(response.headers['retry-after']).toBeDefined();expect(response.body.code).toBe('RATE_LIMITED');});
+    expect(f.service.delete).not.toHaveBeenCalled();
   });
 });

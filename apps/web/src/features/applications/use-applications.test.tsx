@@ -8,7 +8,7 @@ import { ApplicationFailure, createApplicationsApi, type ApplicationsApi } from 
 import { AuthFailure } from '../../lib/auth/api';
 import type { Application } from '@applyflow/contracts';
 import { useApplications } from './use-applications';
-const row: Application = { id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED', applicationDate: null,
+const row: Application = { id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, archivedAt: null, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED', applicationDate: null,
   location: null, jobUrl: null, notes: null, createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z' };
 const input = { company: 'Acme', jobTitle: 'Engineer', status: 'SAVED' as const, applicationDate: null, location: null, jobUrl: null, notes: null };
 const fixtures: ReturnType<typeof authFixture>[] = [];

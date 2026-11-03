@@ -8,7 +8,7 @@ const id = 'c4974360-a70c-4a29-8b41-df95d15d7270';
 const now = new Date('2026-10-22T01:00:00.000Z');
 const proof = { token: 'a'.repeat(64), csrfToken: 'b'.repeat(64) };
 const input = { company: ' Acme ', jobTitle: ' Engineer ' };
-const row = { id, version: 1, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED' as const, applicationDate: null as Date | null,
+const row = { id, version: 1, archivedAt: null, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED' as const, applicationDate: null as Date | null,
   location: null, jobUrl: null, notes: null, createdAt: now, updatedAt: now, userId, passwordHash: 'PRIVATE' };
 function fixture() {
   const session: Session = { id, userId, tokenHash: 'c'.repeat(64), csrfToken: proof.csrfToken,
@@ -72,13 +72,13 @@ describe('owner-scoped application transactions', () => {
     const f = fixture(); const foreign = { ...row, userId: id, company: 'Foreign company' };
     f.findMany.mockImplementation(async args => [row, foreign].filter(value => value.userId === args.where.userId));
     expect((await f.service.list({}, proof)).items.map(value => value.company)).toEqual(['Acme']);
-    expect(f.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId }, take: 21, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] }));
+    expect(f.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId, archivedAt: null }, take: 21, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] }));
   });
   it('uses a strict descending tuple boundary and the last returned item for the next cursor', async () => {
     const f = fixture(); f.findMany.mockResolvedValue([row, { ...row, id: userId }]);
     const cursor = encodeApplicationCursor(row);
     const result = await f.service.list({ limit: '1', cursor }, proof);
-    expect(f.findMany.mock.calls[0]?.[0].where).toEqual({ userId, OR: [{ createdAt: { lt: now } }, { createdAt: now, id: { lt: id } }] });
+    expect(f.findMany.mock.calls[0]?.[0].where).toEqual({ userId, archivedAt: null, OR: [{ createdAt: { lt: now } }, { createdAt: now, id: { lt: id } }] });
     expect(result.items).toHaveLength(1); expect(decodeApplicationCursor(result.nextCursor!)).toEqual({ createdAt: now, id });
     expect(f.findMany.mock.calls[0]?.[0].take).toBe(2);
   });

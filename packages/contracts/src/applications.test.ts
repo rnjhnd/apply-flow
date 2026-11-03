@@ -2,15 +2,56 @@ import { describe, expect, it } from 'vitest';
 import { applicationDateSchema, applicationErrorResponseSchema, applicationSchema, applicationStatusSchema,
   createApplicationRequestSchema, createApplicationResponseSchema, listApplicationsQuerySchema,
   listApplicationsResponseSchema, updateApplicationRequestSchema, applicationStatusHistorySchema,
-  listApplicationHistoryQuerySchema, listApplicationHistoryResponseSchema } from './applications.js';
+  listApplicationHistoryQuerySchema, listApplicationHistoryResponseSchema, applicationLifecycleRequestSchema,
+  deleteApplicationRequestSchema, deleteApplicationResponseSchema, applicationConflictReasonSchema } from './applications.js';
 
 const input = { company: 'Acme', jobTitle: 'Engineer' };
 const dto = {
-  id: '7bf22ee7-a3be-40de-957e-89fca7bac5ad', version: 1, ...input, status: 'SAVED', applicationDate: null,
+  id: '7bf22ee7-a3be-40de-957e-89fca7bac5ad', version: 1, archivedAt: null, ...input, status: 'SAVED', applicationDate: null,
   location: null, jobUrl: null, notes: null,
   createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z'
 };
 const edit = { ...input, status: 'SAVED', applicationDate: null, location: null, jobUrl: null, notes: null, expectedVersion: 1 };
+
+describe('archive lifecycle contracts', () => {
+  it.each([1, 2_147_483_647])('accepts bounded numeric revision %i and explicit deletion intent', expectedVersion => {
+    expect(applicationLifecycleRequestSchema.parse({ expectedVersion })).toEqual({ expectedVersion });
+    expect(deleteApplicationRequestSchema.parse({ expectedVersion, confirmPermanentDeletion: true })).toEqual({ expectedVersion, confirmPermanentDeletion: true });
+  });
+  it.each([undefined, null, 0, -1, 1.5, '1', 2_147_483_648])('rejects invalid or missing lifecycle revision %#', expectedVersion => {
+    expect(applicationLifecycleRequestSchema.safeParse({ expectedVersion }).success).toBe(false);
+    expect(deleteApplicationRequestSchema.safeParse({ expectedVersion, confirmPermanentDeletion: true }).success).toBe(false);
+  });
+  it.each([undefined, null, false, 'true', 1])('requires literal deletion confirmation %#', confirmPermanentDeletion => {
+    expect(deleteApplicationRequestSchema.safeParse({ expectedVersion: 1, confirmPermanentDeletion }).success).toBe(false);
+  });
+  it.each(['userId', 'id', 'version', 'status', 'archivedAt', 'updatedAt', 'history', 'notes'])('rejects client override %s', field => {
+    expect(applicationLifecycleRequestSchema.safeParse({ expectedVersion: 1, [field]: 'injected' }).success).toBe(false);
+    expect(deleteApplicationRequestSchema.safeParse({ expectedVersion: 1, confirmPermanentDeletion: true, [field]: 'injected' }).success).toBe(false);
+  });
+  it('requires nullable canonical archive timestamps and a strict deletion result', () => {
+    expect(applicationSchema.parse(dto).archivedAt).toBeNull();
+    expect(applicationSchema.parse({ ...dto, archivedAt: dto.createdAt }).archivedAt).toBe(dto.createdAt);
+    for (const archivedAt of [undefined, '', '2026-10-22', '2026-10-22T00:00:00Z', '2026-10-22T08:00:00.000+08:00', 1]) {
+      expect(applicationSchema.safeParse({ ...dto, archivedAt }).success).toBe(false);
+    }
+    expect(deleteApplicationResponseSchema.parse({ deletedApplicationId: dto.id })).toEqual({ deletedApplicationId: dto.id });
+    for (const response of [{}, { deletedApplicationId: 'bad' }, { deletedApplicationId: dto.id, history: [] }]) {
+      expect(deleteApplicationResponseSchema.safeParse(response).success).toBe(false);
+    }
+  });
+  it('defaults to active and accepts only an explicit active/archived view', () => {
+    for (const view of ['active', 'archived']) expect(listApplicationsQuerySchema.parse({ view }).view).toBe(view);
+    for (const view of ['all', 'ACTIVE', '', null, false, ['active']]) {
+      expect(listApplicationsQuerySchema.safeParse({ view }).success).toBe(false);
+    }
+  });
+  it.each(applicationConflictReasonSchema.options)('exposes safe conflict reason %s only for conflicts', conflictReason => {
+    expect(applicationErrorResponseSchema.safeParse({ code: 'APPLICATION_CONFLICT', message: 'Review application.', conflictReason }).success).toBe(true);
+    expect(applicationErrorResponseSchema.safeParse({ code: 'NOT_FOUND', message: 'Application not found.', conflictReason }).success).toBe(false);
+    expect(applicationErrorResponseSchema.safeParse({ code: 'APPLICATION_CONFLICT', message: 'Review.', conflictReason: 'private detail' }).success).toBe(false);
+  });
+});
 
 describe('complete versioned edits and history contracts', () => {
   it.each(Object.keys(edit))('requires the %s update key, including nullable values', field => {
@@ -18,7 +59,7 @@ describe('complete versioned edits and history contracts', () => {
     expect(updateApplicationRequestSchema.safeParse(omitted).success).toBe(false);
     expect(updateApplicationRequestSchema.safeParse({ ...edit, [field]: undefined }).success).toBe(false);
   });
-  it.each(['id', 'userId', 'ownerId', 'version', 'createdAt', 'updatedAt', 'history', 'applicationVersion'])('rejects update override %s', field => {
+  it.each(['id', 'userId', 'ownerId', 'version', 'createdAt', 'updatedAt', 'archivedAt', 'history', 'applicationVersion'])('rejects update override %s', field => {
     expect(updateApplicationRequestSchema.safeParse({ ...edit, [field]: 'injected' }).success).toBe(false);
   });
   it.each([0, -1, 1.5, '1', null, 2_147_483_648])('rejects invalid revision %#', expectedVersion => {
@@ -132,8 +173,8 @@ describe('application contracts', () => {
     expect(createApplicationResponseSchema.safeParse({ application: dto, userId: 'secret' }).success).toBe(false);
   });
   it('bounds list queries without silently truncating or accepting owners', () => {
-    expect(listApplicationsQuerySchema.parse({})).toEqual({ limit: 20 });
-    expect(listApplicationsQuerySchema.parse({ limit: '50', cursor: 'abc_DEF-123' })).toEqual({ limit: 50, cursor: 'abc_DEF-123' });
+    expect(listApplicationsQuerySchema.parse({})).toEqual({ limit: 20, view: 'active' });
+    expect(listApplicationsQuerySchema.parse({ limit: '50', cursor: 'abc_DEF-123' })).toEqual({ limit: 50, cursor: 'abc_DEF-123', view: 'active' });
     for (const limit of [0, 51, -1, 1.5, '01', '1.0', '', 'Infinity', true, null, ['20']]) {
       expect(listApplicationsQuerySchema.safeParse({ limit }).success).toBe(false);
     }

@@ -65,6 +65,7 @@ export function createApp(env: Env, authentication: AuthHttpOptions, options: Ap
     if (res.headersSent) return next(error);
     if (error instanceof ApplicationHttpError) {
       res.status(error.status).json({ code: error.code, message: error.message,
+        ...(error.conflictReason === undefined ? {} : { conflictReason: error.conflictReason }),
         ...(error.fieldErrors === undefined ? {} : { fieldErrors: error.fieldErrors }) });
       return;
     }

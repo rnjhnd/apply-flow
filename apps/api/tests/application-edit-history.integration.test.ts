@@ -102,7 +102,7 @@ async function admit(database: Tx | ReturnType<typeof client>) {
 }
 async function schemaAdmission(database: Pick<Tx, '$queryRaw'>) {
   const tables = await database.$queryRaw<Array<{ name: string }>>`SELECT tablename::text AS name FROM pg_tables WHERE schemaname='public'`;
-  validateMigrationTables(tables.map(row => row.name), 3);
+  validateMigrationTables(tables.map(row => row.name), 4);
   const columns = await database.$queryRaw<Array<{ table: string; name: string; type: string; required: boolean; default: string | null }>>`
     SELECT c.relname::text AS "table", a.attname::text AS name, format_type(a.atttypid,a.atttypmod) AS type,
       a.attnotnull AS required, pg_get_expr(d.adbin,d.adrelid) AS "default"
@@ -113,7 +113,7 @@ async function schemaAdmission(database: Pick<Tx, '$queryRaw'>) {
   const expected = {
     User: [['id','uuid',true,null],['email','character varying(254)',true,null],['passwordHash','text',true,null],['createdAt','timestamp(3) with time zone',true,'CURRENT_TIMESTAMP'],['updatedAt','timestamp(3) with time zone',true,null]],
     Session: [['id','uuid',true,null],['tokenHash','character(64)',true,null],['csrfToken','character(64)',true,null],['userId','uuid',false,null],['createdAt','timestamp(3) with time zone',true,'CURRENT_TIMESTAMP'],['lastSeenAt','timestamp(3) with time zone',true,'CURRENT_TIMESTAMP'],['expiresAt','timestamp(3) with time zone',true,null]],
-    JobApplication: [['id','uuid',true,null],['userId','uuid',true,null],['company','character varying(160)',true,null],['jobTitle','character varying(200)',true,null],['status','"ApplicationStatus"',true,"'SAVED'::\"ApplicationStatus\""],['applicationDate','date',false,null],['location','character varying(200)',false,null],['jobUrl','character varying(2048)',false,null],['notes','text',false,null],['createdAt','timestamp(3) with time zone',true,'CURRENT_TIMESTAMP'],['updatedAt','timestamp(3) with time zone',true,null],['version','integer',true,'1']],
+    JobApplication: [['id','uuid',true,null],['userId','uuid',true,null],['company','character varying(160)',true,null],['jobTitle','character varying(200)',true,null],['status','"ApplicationStatus"',true,"'SAVED'::\"ApplicationStatus\""],['applicationDate','date',false,null],['location','character varying(200)',false,null],['jobUrl','character varying(2048)',false,null],['notes','text',false,null],['createdAt','timestamp(3) with time zone',true,'CURRENT_TIMESTAMP'],['updatedAt','timestamp(3) with time zone',true,null],['version','integer',true,'1'],['archivedAt','timestamp(3) with time zone',false,null]],
     ApplicationStatusHistory: [['id','uuid',true,null],['applicationId','uuid',true,null],['fromStatus','"ApplicationStatus"',true,null],['toStatus','"ApplicationStatus"',true,null],['applicationVersion','integer',true,null],['changedAt','timestamp(3) with time zone',true,'CURRENT_TIMESTAMP']],
     _prisma_migrations: [['id','character varying(36)',true,null],['checksum','character varying(64)',true,null],['finished_at','timestamp with time zone',false,null],['migration_name','character varying(255)',true,null],['logs','text',false,null],['rolled_back_at','timestamp with time zone',false,null],['started_at','timestamp with time zone',true,'now()'],['applied_steps_count','integer',true,'0']]
   };

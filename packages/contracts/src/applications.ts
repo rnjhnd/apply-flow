@@ -58,6 +58,13 @@ export const createApplicationRequestSchema = z.strictObject(createFields).refin
 
 export const applicationIdSchema = z.uuid();
 export const applicationVersionSchema = z.number().int().min(1).max(2_147_483_647);
+export const applicationLifecycleRequestSchema = z.strictObject({ expectedVersion: applicationVersionSchema });
+export const deleteApplicationRequestSchema = z.strictObject({
+  expectedVersion: applicationVersionSchema, confirmPermanentDeletion: z.literal(true)
+});
+export const deleteApplicationResponseSchema = z.strictObject({ deletedApplicationId: applicationIdSchema });
+export const applicationViewSchema = z.enum(['active', 'archived']);
+export const applicationConflictReasonSchema = z.enum(['STALE_VERSION', 'APPLICATION_ARCHIVED', 'APPLICATION_NOT_ARCHIVED']);
 // The input check makes every optional-value key required: omitted/undefined is
 // different from an explicit null. Existing field normalization still applies.
 const completeOptional = <T extends z.ZodType>(schema: T) => z.preprocess((value, context) => {
@@ -79,7 +86,8 @@ export const applicationSchema = z.strictObject({
   company: canonicalText(160), jobTitle: canonicalText(200), status: applicationStatusSchema,
   applicationDate: applicationDateSchema.nullable(), location: canonicalText(200).nullable(),
   jobUrl: jobUrlSchema.nullable(), notes: text(4000).nullable(),
-  createdAt: z.iso.datetime({ precision: 3 }), updatedAt: z.iso.datetime({ precision: 3 })
+  createdAt: z.iso.datetime({ precision: 3 }), updatedAt: z.iso.datetime({ precision: 3 }),
+  archivedAt: z.iso.datetime({ precision: 3 }).nullable()
 }).refine(hasRequiredDate, { path: ['applicationDate'], message: 'Application date is required for this status' });
 
 export const createApplicationResponseSchema = z.strictObject({ application: applicationSchema });
@@ -92,7 +100,7 @@ const listLimit = z.union([z.number(), z.string().regex(/^[1-9]\d?$/)
   .refine((value) => value === String(Number(value))).transform(Number)])
   .pipe(z.number().int().min(1).max(50));
 export const listApplicationsQuerySchema = z.strictObject({
-  limit: listLimit.default(20), cursor: applicationCursorSchema.optional()
+  limit: listLimit.default(20), cursor: applicationCursorSchema.optional(), view: applicationViewSchema.default('active')
 });
 export const listApplicationsResponseSchema = z.strictObject({
   items: z.array(applicationSchema).max(50), nextCursor: applicationCursorSchema.nullable()
@@ -115,11 +123,17 @@ export const applicationErrorResponseSchema = z.strictObject({
   code: z.enum(['INVALID_REQUEST', 'UNAUTHENTICATED', 'REQUEST_REJECTED', 'NOT_FOUND', 'RATE_LIMITED',
     'APPLICATION_CONFLICT', 'SERVICE_UNAVAILABLE', 'INTERNAL_ERROR', 'INVALID_JSON', 'BODY_TOO_LARGE', 'UNSUPPORTED_ENCODING', 'INVALID_COOKIE']),
   message: z.string().max(200),
+  conflictReason: applicationConflictReasonSchema.optional(),
   fieldErrors: z.strictObject({ company: messages.optional(), jobTitle: messages.optional(), status: messages.optional(),
     applicationDate: messages.optional(), location: messages.optional(), jobUrl: messages.optional(), notes: messages.optional() }).optional()
-});
+}).refine(value => value.conflictReason === undefined || value.code === 'APPLICATION_CONFLICT');
 
 export type ApplicationStatus = z.infer<typeof applicationStatusSchema>;
+export type ApplicationLifecycleRequest = z.infer<typeof applicationLifecycleRequestSchema>;
+export type DeleteApplicationRequest = z.infer<typeof deleteApplicationRequestSchema>;
+export type DeleteApplicationResponse = z.infer<typeof deleteApplicationResponseSchema>;
+export type ApplicationView = z.infer<typeof applicationViewSchema>;
+export type ApplicationConflictReason = z.infer<typeof applicationConflictReasonSchema>;
 export type CreateApplicationInput = z.input<typeof createApplicationRequestSchema>;
 export type CreateApplicationRequest = z.infer<typeof createApplicationRequestSchema>;
 export type Application = z.infer<typeof applicationSchema>;
