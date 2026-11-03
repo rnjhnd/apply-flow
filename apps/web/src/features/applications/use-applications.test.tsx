@@ -20,6 +20,47 @@ async function fixture() {
   return { ...hook, auth, api };
 }
 describe('page-owned application lifecycle', () => {
+  it('starts each view with a fresh first page and never carries a cursor between views', async () => {
+    const f = await fixture();
+    f.api.list.mockResolvedValueOnce({ items: [row], nextCursor: 'active-cursor' });
+    await act(async () => { f.result.current.enter(); });
+    f.api.list.mockResolvedValueOnce({ items: [{ ...row, archivedAt: row.createdAt }], nextCursor: 'archived-cursor' });
+    await act(async () => { f.result.current.switchView('archived'); });
+    expect(f.api.list.mock.calls[1]![0]).toEqual({ view: 'archived' });
+    f.api.list.mockResolvedValueOnce({ items: [], nextCursor: null });
+    await act(async () => { f.result.current.loadMore(); });
+    expect(f.api.list.mock.calls[2]![0]).toEqual({ view: 'archived', cursor: 'archived-cursor' });
+    await act(async () => { f.result.current.switchView('active'); });
+    expect(f.api.list.mock.calls[3]![0]).toEqual({}); expect(f.result.current.view).toBe('active');
+  });
+  it('ignores a late previous-view response after switching views', async () => {
+    const f = await fixture(), gate = deferred<{ items: Application[]; nextCursor: string | null }>();
+    f.api.list.mockReturnValueOnce(gate.promise).mockResolvedValueOnce({ items: [], nextCursor: null });
+    act(() => f.result.current.enter());
+    await act(async () => { f.result.current.switchView('archived'); });
+    expect(f.api.list.mock.calls[0]![1]?.aborted).toBe(true);
+    await act(async () => { gate.resolve({ items: [row], nextCursor: 'old-cursor' }); });
+    expect(f.result.current.view).toBe('archived'); expect(f.result.current.items).toEqual([]); expect(f.result.current.nextCursor).toBeNull();
+  });
+  it('removes only a confirmed lifecycle target while preserving siblings and pagination', async () => {
+    const f = await fixture(), sibling = { ...row, id: user.id };
+    f.api.list.mockResolvedValueOnce({ items: [row, sibling], nextCursor: 'next' });
+    await act(async () => { f.result.current.enter(); });
+    act(() => f.result.current.replaceItem({ ...row, archivedAt: row.createdAt, version: 2 }));
+    expect(f.result.current.items).toEqual([sibling]); expect(f.result.current.nextCursor).toBe('next'); expect(f.api.list).toHaveBeenCalledOnce();
+    f.api.list.mockResolvedValueOnce({ items: [{ ...row, archivedAt: row.createdAt }, { ...sibling, archivedAt: row.createdAt }], nextCursor: 'older' });
+    await act(async () => { f.result.current.switchView('archived'); });
+    act(() => f.result.current.replaceItem({ ...row, version: 3 }));
+    expect(f.result.current.items.map(item => item.id)).toEqual([sibling.id]); expect(f.result.current.nextCursor).toBe('older');
+    act(() => f.result.current.removeItem(sibling.id));
+    expect(f.result.current.items).toEqual([]); expect(f.result.current.nextCursor).toBe('older'); expect(f.result.current.view).toBe('archived');
+  });
+  it('prevents creation in Archived and clears view state on confirmed logout', async () => {
+    const f = await fixture(); await act(async () => { f.result.current.switchView('archived'); });
+    act(() => f.result.current.save(input, () => true)); expect(f.api.create).not.toHaveBeenCalled();
+    await act(async () => { await f.auth.store.logout(); });
+    expect(f.result.current.view).toBe('active'); expect(f.result.current.items).toEqual([]); expect(f.result.current.nextCursor).toBeNull();
+  });
   it('defers listing until protected admission and coalesces repeated entries', async () => {
     const f = await fixture(); expect(f.api.list).not.toHaveBeenCalled();
     await act(async () => { f.result.current.enter(); f.result.current.enter(); });

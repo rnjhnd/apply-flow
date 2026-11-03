@@ -6,6 +6,7 @@ import type { ApplicationsController } from './use-applications';
 function controller(overrides: Partial<ApplicationsController> = {}): ApplicationsController {
   return { draft: { company: '', jobTitle: '', status: 'SAVED', applicationDate: '', location: '', jobUrl: '', notes: '' },
     setDraft: vi.fn(), items: [], nextCursor: null, loading: false, saving: false, listError: false, failure: null,
+    view: 'active', switchView: vi.fn(), removeItem: vi.fn(),
     message: null, enter: vi.fn(), save: vi.fn(), cooldown: 0, refresh: vi.fn(), loadMore: vi.fn(), replaceItem: vi.fn(), ...overrides };
 }
 describe('application list presentation', () => {
