@@ -6,7 +6,7 @@ import { authFixture, deferred, user } from '../../test/auth-fixtures';
 import { ApplicationFailure, type ApplicationsApi } from '../../lib/applications/api';
 import { useApplicationEditor } from './use-application-editor';
 
-const row: Application = { id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED',
+const row: Application = { id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, archivedAt: null, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED',
   applicationDate: null, location: null, jobUrl: null, notes: null, createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z' };
 const input: UpdateApplicationRequest = { company: 'Acme', jobTitle: 'Engineer', status: 'SAVED', applicationDate: null, location: null, jobUrl: null, notes: null, expectedVersion: 1 };
 const event = { id: user.id, fromStatus: 'SAVED' as const, toStatus: 'APPLIED' as const, applicationVersion: 2, changedAt: row.createdAt };
@@ -15,14 +15,107 @@ afterEach(() => { fixtures.splice(0).forEach(f => f.store.dispose()); });
 async function fixture() {
   const auth = authFixture({ authenticated: true }); fixtures.push(auth); await auth.store.bootstrap();
   const api = { create: vi.fn<ApplicationsApi['create']>(), list: vi.fn<ApplicationsApi['list']>(),
+    archive: vi.fn<ApplicationsApi['archive']>().mockResolvedValue({ application: { ...row, version: 2, archivedAt: row.createdAt } }),
+    restore: vi.fn<ApplicationsApi['restore']>().mockResolvedValue({ application: { ...row, version: 3 } }),
+    delete: vi.fn<ApplicationsApi['delete']>().mockResolvedValue({ deletedApplicationId: row.id }),
     get: vi.fn<ApplicationsApi['get']>().mockResolvedValue({ application: row }),
     update: vi.fn<ApplicationsApi['update']>().mockResolvedValue({ application: { ...row, version: 2 } }),
     history: vi.fn<ApplicationsApi['history']>().mockResolvedValue({ items: [], nextCursor: null }) };
-  const saved = vi.fn();
-  const hook = renderHook(() => useApplicationEditor(auth.store, api, saved), { wrapper: StrictMode });
-  return { ...hook, auth, api, saved, open: async () => { await act(async () => { hook.result.current.open(row.id); }); } };
+  const saved = vi.fn(), removed = vi.fn();
+  const hook = renderHook(() => useApplicationEditor(auth.store, api, saved, removed), { wrapper: StrictMode });
+  return { ...hook, auth, api, saved, removed, open: async () => { await act(async () => { hook.result.current.open(row.id); }); } };
 }
 describe('account-owned editor lifecycle', () => {
+  it('preserves a dirty draft until archive confirmation succeeds and blocks duplicate/conflicting actions', async () => {
+    const f = await fixture(); await f.open();
+    act(() => f.result.current.setDraft({ ...f.result.current.draft!, notes: 'Keep this draft' }));
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await act(async () => { f.result.current.archive(() => true); });
+    expect(f.api.archive).not.toHaveBeenCalled(); expect(f.result.current.draft?.notes).toBe('Keep this draft');
+    confirm.mockReturnValue(true); const gate = deferred<{ application: Application }>(); f.api.archive.mockReturnValue(gate.promise);
+    act(() => { f.result.current.archive(() => true); f.result.current.archive(() => true); f.result.current.save(input, () => true); f.result.current.closeForView(); });
+    expect(f.api.archive).toHaveBeenCalledExactlyOnceWith(row.id, { expectedVersion: 1 });
+    expect(f.api.update).not.toHaveBeenCalled(); expect(f.result.current.draft?.notes).toBe('Keep this draft');
+    await act(async () => { gate.resolve({ application: { ...row, archivedAt: row.createdAt, version: 2 } }); });
+    expect(f.result.current.selectedId).toBeNull(); expect(f.saved).toHaveBeenCalledOnce();
+  });
+  it('keeps archived records read-only and restores using fresh detail version without refreshing history', async () => {
+    const f = await fixture(); f.api.get.mockResolvedValue({ application: { ...row, archivedAt: row.createdAt, version: 7 } }); await f.open();
+    act(() => { f.result.current.setDraft({ ...f.result.current.draft!, notes: 'No' }); f.result.current.save({ ...input, expectedVersion: 7 }, () => true); });
+    expect(f.result.current.draft?.notes).toBe(''); expect(f.api.update).not.toHaveBeenCalled();
+    await act(async () => { f.result.current.restore(() => true); });
+    expect(f.api.restore).toHaveBeenCalledExactlyOnceWith(row.id, { expectedVersion: 7 });
+    expect(f.api.history).toHaveBeenCalledOnce(); expect(f.result.current.selectedId).toBeNull();
+  });
+  it('requires inline confirmation before deletion and keeps recovery context on an uncertain result and later 404', async () => {
+    const f = await fixture(); f.api.get.mockResolvedValue({ application: { ...row, archivedAt: row.createdAt, version: 4 } }); await f.open();
+    act(() => f.result.current.deletePermanently(() => true)); expect(f.api.delete).not.toHaveBeenCalled();
+    act(() => f.result.current.requestDeletion()); expect(f.result.current.focusTarget).toBe('application-delete-cancel');
+    act(() => f.result.current.cancelDeletion()); expect(f.result.current.deleteConfirm).toBe(false); expect(f.result.current.focusTarget).toBe('application-delete-action');
+    act(() => f.result.current.requestDeletion()); f.api.delete.mockRejectedValue(new ApplicationFailure('unknown'));
+    await act(async () => { f.result.current.deletePermanently(() => true); });
+    expect(f.api.delete).toHaveBeenCalledExactlyOnceWith(row.id, { expectedVersion: 4, confirmPermanentDeletion: true });
+    expect(f.removed).not.toHaveBeenCalled(); expect(f.result.current.recovery).toBe('unknown');
+    f.api.get.mockRejectedValue(new ApplicationFailure('http', 404, undefined, null, 'NOT_FOUND'));
+    await act(async () => { f.result.current.reviewSaved(); });
+    expect(f.result.current.detailError).toBe('unavailable'); expect(f.result.current.mutationKind).toBe('delete');
+    f.api.get.mockResolvedValue({ application: { ...row, version: 5, archivedAt: row.createdAt } });
+    await act(async () => { f.result.current.retryDetails(); });
+    await act(async () => { await f.auth.store.revalidate(); });
+    expect(f.result.current.review?.version).toBe(5); expect(f.result.current.application?.version).toBe(4);
+    expect(f.result.current.recovery).toBe('unknown'); expect(f.api.delete).toHaveBeenCalledOnce();
+  });
+  it('removes the selected item only after confirmed permanent deletion', async () => {
+    const f = await fixture(); f.api.get.mockResolvedValue({ application: { ...row, archivedAt: row.createdAt } }); await f.open();
+    act(() => f.result.current.requestDeletion());
+    const gate = deferred<{ deletedApplicationId: string }>(); f.api.delete.mockReturnValue(gate.promise);
+    act(() => { f.result.current.deletePermanently(() => true); f.result.current.deletePermanently(() => true); f.result.current.restore(() => true); });
+    expect(f.removed).not.toHaveBeenCalled(); expect(f.api.delete).toHaveBeenCalledOnce(); expect(f.api.restore).not.toHaveBeenCalled();
+    await act(async () => { gate.resolve({ deletedApplicationId: row.id }); });
+    expect(f.removed).toHaveBeenCalledExactlyOnceWith(row.id); expect(f.result.current.selectedId).toBeNull();
+  });
+  it('does not transfer an earlier application confirmation or edit handler to another selection', async () => {
+    const f = await fixture(); f.api.get.mockResolvedValue({ application: { ...row, archivedAt: row.createdAt } }); await f.open();
+    act(() => f.result.current.requestDeletion());
+    const oldDelete = f.result.current.deletePermanently, oldSave = f.result.current.save, oldConfirm = f.result.current.requestDeletion;
+    f.api.get.mockResolvedValue({ application: { ...row, id: user.id, archivedAt: row.createdAt } });
+    await act(async () => { f.result.current.open(user.id); });
+    act(() => { oldDelete(() => true); oldSave(input, () => true); oldConfirm(); });
+    expect(f.api.delete).not.toHaveBeenCalled(); expect(f.api.update).not.toHaveBeenCalled();
+    expect(f.result.current.selectedId).toBe(user.id); expect(f.result.current.deleteConfirm).toBe(false);
+  });
+  it.each(['STALE_VERSION', 'APPLICATION_ARCHIVED', 'APPLICATION_NOT_ARCHIVED'] as const)('retains %s and a draft for explicit review without mutation replay', async reason => {
+    const f = await fixture(); await f.open(); vi.spyOn(window, 'confirm').mockReturnValue(true);
+    act(() => f.result.current.setDraft({ ...f.result.current.draft!, notes: 'Private draft' }));
+    f.api.archive.mockRejectedValue(new ApplicationFailure('http', 409, undefined, null, 'APPLICATION_CONFLICT', reason));
+    await act(async () => { f.result.current.archive(() => true); });
+    expect(f.result.current.failure?.conflictReason).toBe(reason); expect(f.result.current.draft?.notes).toBe('Private draft');
+    await act(async () => { await f.auth.store.revalidate(); f.result.current.archive(() => true); f.result.current.reviewSaved(); });
+    expect(f.result.current.review).toEqual(row); expect(f.api.archive).toHaveBeenCalledOnce();
+  });
+  it.each((['archive', 'restore', 'delete'] as const).flatMap(kind => (['replacement', 'logout'] as const).map(outcome => ({ kind, outcome }))))('ignores a late $kind outcome after $outcome', async ({ kind, outcome }) => {
+    const f = await fixture(), archived = { ...row, archivedAt: row.createdAt };
+    f.api.get.mockResolvedValue({ application: kind === 'archive' ? row : archived }); await f.open();
+    const gate = deferred<void>();
+    f.api.archive.mockImplementation(async () => { await gate.promise; return { application: archived }; });
+    f.api.restore.mockImplementation(async () => { await gate.promise; return { application: row }; });
+    f.api.delete.mockImplementation(async () => { await gate.promise; return { deletedApplicationId: row.id }; });
+    if (kind === 'delete') act(() => f.result.current.requestDeletion());
+    act(() => { if (kind === 'delete') f.result.current.deletePermanently(() => true); else f.result.current[kind](() => true); });
+    if (outcome === 'replacement') f.auth.api.me.mockResolvedValue({ user: { ...user, id: row.id } });
+    await act(async () => { if (outcome === 'replacement') await f.auth.store.revalidate(); else await f.auth.store.logout(); gate.resolve(); });
+    expect(f.result.current.selectedId).toBeNull(); expect(f.result.current.draft).toBeNull(); expect(f.result.current.history).toEqual([]);
+    expect(f.saved).not.toHaveBeenCalled(); expect(f.removed).not.toHaveBeenCalled();
+  });
+  it.each(['archive', 'restore'] as const)('keeps uncertain %s context through same-account verification without replay', async kind => {
+    const f = await fixture(); f.api.get.mockResolvedValue({ application: { ...row, archivedAt: kind === 'restore' ? row.createdAt : null } }); await f.open();
+    f.api[kind].mockRejectedValue(new ApplicationFailure('unknown'));
+    await act(async () => { f.result.current[kind](() => true); });
+    await act(async () => { await f.auth.store.revalidate(); f.result.current[kind](() => true); });
+    expect(f.api[kind]).toHaveBeenCalledOnce(); expect(f.result.current.selectedId).toBe(row.id);
+    expect(f.result.current.recovery).toBe('unknown'); expect(f.result.current.mutationKind).toBe(kind);
+    expect(f.saved).not.toHaveBeenCalled();
+  });
   it('waits for fresh details before prefilling and then reads history', async () => {
     const f = await fixture(), gate = deferred<{ application: Application }>(); f.api.get.mockReturnValue(gate.promise);
     act(() => f.result.current.open(row.id));

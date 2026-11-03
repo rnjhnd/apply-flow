@@ -1,14 +1,15 @@
 import { applicationErrorResponseSchema, createApplicationRequestSchema, createApplicationResponseSchema,
   listApplicationsQuerySchema, listApplicationsResponseSchema, applicationIdSchema, getApplicationResponseSchema,
   updateApplicationRequestSchema, updateApplicationResponseSchema, listApplicationHistoryQuerySchema,
-  listApplicationHistoryResponseSchema, type ApplicationErrorResponse } from '@applyflow/contracts';
+  listApplicationHistoryResponseSchema, applicationLifecycleRequestSchema, deleteApplicationRequestSchema,
+  deleteApplicationResponseSchema, type ApplicationErrorResponse } from '@applyflow/contracts';
 import { AuthFailure, retryAfter } from '../auth/api';
 import type { AuthStore } from '../auth/store';
 
 export class ApplicationFailure extends Error {
   constructor(readonly kind: 'validation' | 'http' | 'unknown' | 'stale', readonly status = 0,
     readonly fields: ApplicationErrorResponse['fieldErrors'] = undefined, readonly retryAt: number | null = null,
-    readonly code?: ApplicationErrorResponse['code']) {
+    readonly code?: ApplicationErrorResponse['code'], readonly conflictReason?: ApplicationErrorResponse['conflictReason']) {
     super('The application request could not be completed.'); this.name = 'ApplicationFailure';
   }
 }
@@ -18,7 +19,7 @@ export function createApplicationsApi(store: AuthStore, fetcher: typeof fetch = 
   function admit() {
     if (cooldownUntil !== null && cooldownUntil > now()) throw new ApplicationFailure('http', 429, undefined, cooldownUntil);
   }
-  async function request<T>(url: string, schema: { parse(value: unknown): T }, input?: { body: unknown; proof: string; method?: 'PUT' }, signal?: AbortSignal) {
+  async function request<T>(url: string, schema: { parse(value: unknown): T }, input?: { body: unknown; proof: string; method?: 'PUT' | 'DELETE'; successStatus?: 200 | 201 }, signal?: AbortSignal) {
     admit();
     let response: Response;
     try { response = await fetcher(url, { method: input ? input.method ?? 'POST' : 'GET', credentials: 'same-origin', redirect: 'error', cache: 'no-store',
@@ -35,9 +36,9 @@ export function createApplicationsApi(store: AuthStore, fetcher: typeof fetch = 
       if (!parsed.success) throw new ApplicationFailure('unknown', response.status, undefined, retryAt);
       // Never retain arbitrary response messages, exception bodies or input echoes.
       const fields = parsed.data.fieldErrors ? Object.fromEntries(Object.keys(parsed.data.fieldErrors).map(key => [key, ['Review this field.']])) : undefined;
-      throw new ApplicationFailure(response.status >= 500 ? 'unknown' : 'http', response.status, fields, retryAt, parsed.data.code);
+      throw new ApplicationFailure(response.status >= 500 ? 'unknown' : 'http', response.status, fields, retryAt, parsed.data.code, parsed.data.conflictReason);
     }
-    try { if (response.status !== (input && input.method !== 'PUT' ? 201 : 200)) throw new Error(); return schema.parse(body); }
+    try { if (response.status !== (input?.successStatus ?? (input && !input.method ? 201 : 200))) throw new Error(); return schema.parse(body); }
     catch { throw new ApplicationFailure('unknown', response.status); }
   }
   function id(value: unknown) {
@@ -54,7 +55,37 @@ export function createApplicationsApi(store: AuthStore, fetcher: typeof fetch = 
       throw new ApplicationFailure('stale');
     }
   }
+  async function mutate<T>(send: (proof: string) => Promise<T>) {
+    admit(); let dispatched = false;
+    try { return await store.authenticatedRequest(proof => { dispatched = true; return send(proof); }); }
+    catch (error) {
+      if (error instanceof ApplicationFailure) throw error;
+      if (error instanceof AuthFailure && error.kind === 'cooldown') throw new ApplicationFailure('http', 429, undefined, error.retryAt);
+      throw new ApplicationFailure(dispatched ? 'unknown' : 'stale');
+    }
+  }
+  async function lifecycle(value: unknown, input: unknown, operation: 'archive' | 'restore') {
+    const key = id(value), parsed = applicationLifecycleRequestSchema.safeParse(input);
+    if (!parsed.success) throw new ApplicationFailure('validation');
+    return mutate(async proof => {
+      const result = await request(`/api/applications/${key}/${operation}`, updateApplicationResponseSchema,
+        { body: parsed.data, proof, successStatus: 200 });
+      if (result.application.id !== key || (result.application.archivedAt !== null) !== (operation === 'archive')) throw new ApplicationFailure('unknown');
+      return result;
+    });
+  }
   return {
+    archive: (value: unknown, input: unknown) => lifecycle(value, input, 'archive'),
+    restore: (value: unknown, input: unknown) => lifecycle(value, input, 'restore'),
+    async delete(value: unknown, input: unknown) {
+      const key = id(value), parsed = deleteApplicationRequestSchema.safeParse(input);
+      if (!parsed.success) throw new ApplicationFailure('validation');
+      return mutate(async proof => {
+        const result = await request(`/api/applications/${key}`, deleteApplicationResponseSchema, { body: parsed.data, proof, method: 'DELETE' });
+        if (result.deletedApplicationId !== key) throw new ApplicationFailure('unknown');
+        return result;
+      });
+    },
     async get(value: unknown, signal?: AbortSignal) {
       const key = id(value);
       return read(async () => {
@@ -116,6 +147,7 @@ export function createApplicationsApi(store: AuthStore, fetcher: typeof fetch = 
       const parsed = listApplicationsQuerySchema.safeParse(input);
       if (!parsed.success) throw new ApplicationFailure('validation');
       const query = new URLSearchParams({ limit: String(parsed.data.limit) });
+      if (parsed.data.view === 'archived') query.set('view', 'archived');
       if (parsed.data.cursor) query.set('cursor', parsed.data.cursor);
       try {
         // The same lock covers authoritative session verification and the GET.

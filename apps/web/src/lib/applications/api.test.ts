@@ -5,7 +5,7 @@ import { createAuthStore } from '../auth/store';
 import { AuthFailure, type AuthApi } from '../auth/api';
 import type { AuthCoordination, AuthCoordinationEvent } from '../auth/coordination';
 
-const dto = { id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED',
+const dto = { id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, archivedAt: null, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED',
   applicationDate: null, location: null, jobUrl: null, notes: null, createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z' };
 const json = (body: unknown, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
 async function fixture() {
@@ -13,6 +13,61 @@ async function fixture() {
   const fetcher = vi.fn<typeof fetch>(); const api = createApplicationsApi(auth.store, fetcher, () => 1000);
   return { auth, fetcher, api };
 }
+
+describe('lifecycle transport', () => {
+  it.each(['archive', 'restore', 'delete'] as const)('sends one strict %s request with session proof and validates the target', async kind => {
+    const f = await fixture();
+    try {
+      const body = kind === 'delete' ? { expectedVersion: 7, confirmPermanentDeletion: true } : { expectedVersion: 7 };
+      f.fetcher.mockResolvedValue(json(kind === 'delete' ? { deletedApplicationId: dto.id }
+        : { application: { ...dto, version: 8, archivedAt: kind === 'archive' ? dto.createdAt : null } }));
+      await f.api[kind](dto.id, body);
+      const [url, options] = f.fetcher.mock.calls[0]!;
+      expect(url).toBe(`/api/applications/${dto.id}${kind === 'delete' ? '' : `/${kind}`}`);
+      expect(options).toMatchObject({ method: kind === 'delete' ? 'DELETE' : 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
+        headers: { 'X-CSRF-Token': proof, 'X-ApplyFlow-Request': '1' }, body: JSON.stringify(body) });
+      expect(options).not.toHaveProperty('signal'); expect(f.fetcher).toHaveBeenCalledOnce();
+    } finally { f.auth.store.dispose(); }
+  });
+  it.each(['archive', 'restore', 'delete'] as const)('rejects malformed %s payloads locally and never replays uncertain writes', async kind => {
+    const f = await fixture();
+    try {
+      await expect(f.api[kind](dto.id, { expectedVersion: 1, userId: user.id })).rejects.toMatchObject({ kind: 'validation' });
+      await expect(f.api[kind]('invalid', { expectedVersion: 1, confirmPermanentDeletion: true })).rejects.toMatchObject({ kind: 'validation' });
+      expect(f.fetcher).not.toHaveBeenCalled();
+      f.fetcher.mockRejectedValue(new Error('PRIVATE token response'));
+      const error = await f.api[kind](dto.id, kind === 'delete' ? { expectedVersion: 1, confirmPermanentDeletion: true } : { expectedVersion: 1 }).catch(value => value);
+      expect(error).toMatchObject({ kind: 'unknown' }); expect(String(error)).not.toContain('PRIVATE');
+      await f.auth.store.revalidate(); expect(f.fetcher).toHaveBeenCalledOnce();
+    } finally { f.auth.store.dispose(); }
+  });
+  it.each(['STALE_VERSION', 'APPLICATION_ARCHIVED', 'APPLICATION_NOT_ARCHIVED'] as const)('retains only the validated %s conflict reason', async conflictReason => {
+    const f = await fixture();
+    try {
+      f.fetcher.mockResolvedValue(json({ code: 'APPLICATION_CONFLICT', conflictReason, message: 'PRIVATE' }, 409));
+      const error = await f.api.archive(dto.id, { expectedVersion: 1 }).catch(value => value);
+      expect(error).toMatchObject({ code: 'APPLICATION_CONFLICT', conflictReason, status: 409 }); expect(JSON.stringify(error)).not.toContain('PRIVATE');
+    } finally { f.auth.store.dispose(); }
+  });
+  it('includes the archived view and its cursor without changing the active default', async () => {
+    const f = await fixture();
+    try {
+      f.fetcher.mockResolvedValue(json({ items: [], nextCursor: null }));
+      await f.api.list({ view: 'archived', cursor: 'cursor' });
+      expect(f.fetcher.mock.calls[0]![0]).toBe('/api/applications?limit=20&view=archived&cursor=cursor');
+      await expect(f.api.list({ view: 'all' })).rejects.toMatchObject({ kind: 'validation' });
+    } finally { f.auth.store.dispose(); }
+  });
+  it('rejects wrong deletion IDs and wrong lifecycle-state responses as uncertain', async () => {
+    const f = await fixture();
+    try {
+      f.fetcher.mockResolvedValueOnce(json({ deletedApplicationId: user.id })).mockResolvedValueOnce(json({ application: dto }));
+      await expect(f.api.delete(dto.id, { expectedVersion: 1, confirmPermanentDeletion: true })).rejects.toMatchObject({ kind: 'unknown' });
+      await expect(f.api.archive(dto.id, { expectedVersion: 1 })).rejects.toMatchObject({ kind: 'unknown' });
+      expect(f.fetcher).toHaveBeenCalledTimes(2);
+    } finally { f.auth.store.dispose(); }
+  });
+});
 describe('same-origin typed applications transport', () => {
   it.each([401, 403])('reconciles GET %i once and invalidates rejected admission', async status => {
     const f = await fixture(); const invalidated: boolean[] = [];

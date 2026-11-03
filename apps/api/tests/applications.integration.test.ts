@@ -108,14 +108,16 @@ beforeAll(async () => {
   const tables = await client().$queryRaw<Array<{ name: string }>>`
     SELECT tablename::text AS name FROM pg_tables WHERE schemaname = 'public'
   `;
-  validateMigrationTables(tables.map(row => row.name), 3);
-  const columns = await client().$queryRaw<Array<{ name: string; data_type: string; nullable: string; maximum: number | null }>>`
+  validateMigrationTables(tables.map(row => row.name), 4);
+  const columns = await client().$queryRaw<Array<{ name: string; data_type: string; nullable: string; maximum: number | null; precision: number | null; default: string | null }>>`
     SELECT column_name::text AS name, data_type::text AS data_type, is_nullable::text AS nullable,
-      character_maximum_length AS maximum FROM information_schema.columns
+      character_maximum_length AS maximum, datetime_precision AS precision, column_default AS "default" FROM information_schema.columns
     WHERE table_schema = 'public' AND table_name = 'JobApplication'
   `;
   const column = (name: string) => columns.find(row => row.name === name);
-  if (columns.length !== 12 || column('version')?.data_type !== 'integer' || column('version')?.nullable !== 'NO'
+  if (columns.length !== 13 || column('archivedAt')?.data_type !== 'timestamp with time zone' || column('archivedAt')?.nullable !== 'YES'
+    || column('archivedAt')?.precision !== 3 || column('archivedAt')?.default !== null
+    || column('version')?.data_type !== 'integer' || column('version')?.nullable !== 'NO'
     || column('id')?.data_type !== 'uuid' || column('userId')?.data_type !== 'uuid'
     || column('userId')?.nullable !== 'NO' || column('company')?.maximum !== 160
     || column('jobTitle')?.maximum !== 200 || column('applicationDate')?.data_type !== 'date'
@@ -224,7 +226,7 @@ it('commits an authenticated create, preserves DATE, and returns public fields t
   expect(response.body.application).toMatchObject({ company: `${marker}company`, status: 'APPLIED',
     applicationDate: '2024-02-29', notes: 'private formatting\nretained' });
   expect(Object.keys(response.body.application).sort()).toEqual([
-    'applicationDate', 'company', 'createdAt', 'id', 'jobTitle', 'jobUrl', 'location', 'notes', 'status', 'updatedAt', 'version'
+    'applicationDate', 'archivedAt', 'company', 'createdAt', 'id', 'jobTitle', 'jobUrl', 'location', 'notes', 'status', 'updatedAt', 'version'
   ]);
   const other = await openLocalDatabase('test', process.env);
   try {

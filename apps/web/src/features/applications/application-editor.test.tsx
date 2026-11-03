@@ -8,7 +8,7 @@ import { App } from '../../App';
 import { authFixture, deferred, user } from '../../test/auth-fixtures';
 import { AuthFailure } from '../../lib/auth/api';
 
-const row: Application = { id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED',
+const row: Application = { id: 'c4974360-a70c-4a29-8b41-df95d15d7270', version: 1, archivedAt: null, company: 'Acme', jobTitle: 'Engineer', status: 'SAVED',
   applicationDate: null, location: 'Manila', jobUrl: 'https://example.invalid/job', notes: 'First\n  Second',
   createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z' };
 const event = { id: user.id, fromStatus: 'SAVED', toStatus: 'APPLIED', applicationVersion: 2, changedAt: row.createdAt };

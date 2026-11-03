@@ -24,7 +24,7 @@ type State = { application: JobApplication; sessions: Session[]; history: Applic
 function fixture(status: ApplicationStatus = 'SAVED') {
   let state: State = { application: { id, userId, company: 'Acme', jobTitle: 'Engineer', status,
     applicationDate: status === 'SAVED' ? null : new Date('2024-02-29T00:00:00.000Z'),
-    location: null, jobUrl: null, notes: null, version: 1, createdAt: before, updatedAt: before },
+    location: null, jobUrl: null, notes: null, version: 1, archivedAt: null, createdAt: before, updatedAt: before },
   sessions: [proof, secondProof].map((p, index) => ({ id: index === 0 ? id : userId, userId,
     tokenHash: hashSessionToken(p.token), csrfToken: p.csrfToken, createdAt: before, lastSeenAt: before,
     expiresAt: new Date('2026-10-23T12:00:00.000Z') })), history: [] };

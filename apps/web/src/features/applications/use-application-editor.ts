@@ -10,17 +10,18 @@ function draftOf(row: Application): ApplicationDraft {
     location: row.location ?? '', jobUrl: row.jobUrl ?? '', notes: row.notes ?? '' };
 }
 type EditorState = { selectedId: string | null; application: Application | null; draft: ApplicationDraft | null;
-  loading: boolean; saving: boolean; detailError: 'load' | 'review' | null; failure: ApplicationFailure | null;
+  loading: boolean; saving: boolean; detailError: 'load' | 'review' | 'unavailable' | null; failure: ApplicationFailure | null;
+  mutationKind: 'save' | 'archive' | 'restore' | 'delete' | null; deleteConfirm: boolean;
   recovery: 'conflict' | 'unknown' | null; review: Application | null; notice: string | null;
   history: ApplicationStatusHistory[]; historyCursor: string | null; historyLoading: boolean; historyError: boolean; historyRetryCursor: string | null;
   focusTarget: string | null };
 const empty = (): EditorState => ({ selectedId: null, application: null, draft: null, loading: false, saving: false,
-  detailError: null, failure: null, recovery: null, review: null, notice: null, history: [], historyCursor: null,
+  detailError: null, failure: null, recovery: null, review: null, notice: null, mutationKind: null, deleteConfirm: false, history: [], historyCursor: null,
   historyLoading: false, historyError: false, historyRetryCursor: null, focusTarget: null });
 
 // Lives above AuthRoute's temporary unmounts. Drafts stay in memory only and are
 // never persisted to browser storage or transferred to another account.
-export function useApplicationEditor(store: AuthStore, api: ApplicationsApi, onSaved: (row: Application) => void) {
+export function useApplicationEditor(store: AuthStore, api: ApplicationsApi, onSaved: (row: Application, lifecycle?: 'archive' | 'restore') => void, onDeleted?: (id: string) => void) {
   const [state, setState] = useState(empty);
   const navigation = useContext(WorkspaceNavigationContext);
   const lifetime = useRef({ active: false, userId: null as string | null, selectedId: null as string | null,
@@ -54,12 +55,12 @@ export function useApplicationEditor(store: AuthStore, api: ApplicationsApi, onS
   const dirty = !!state.application && !!state.draft && JSON.stringify(state.draft) !== JSON.stringify(draftOf(state.application));
   const guardedDraft = dirty || state.recovery !== null || state.saving;
   useLayoutEffect(() => {
-    const message = 'Leave this workspace and discard your draft? An earlier save may already have succeeded.';
+    const message = 'Leave this workspace and discard your draft? An earlier operation may already have succeeded.';
     return navigation?.register({ dirty: guardedDraft, confirm: () => window.confirm(message) });
   }, [guardedDraft, navigation]);
   function consent() {
     return !(dirty || state.recovery) || window.confirm(state.recovery === 'unknown'
-      ? 'Discard this draft? An earlier save may already have succeeded. Review the saved application before making further changes.'
+      ? 'Discard this draft? An earlier operation may already have succeeded. Review the saved application before making further changes.'
       : 'Discard your unsaved application changes?');
   }
   function beginRead(kind: 'load' | 'review' | 'history') {
@@ -95,9 +96,10 @@ export function useApplicationEditor(store: AuthStore, api: ApplicationsApi, onS
       if (!read.current() || !admitted()) return;
       loaded = true;
       setState(previous => review ? { ...previous, review: application, focusTarget: 'application-saved-review' }
-        : { ...previous, application, draft: draftOf(application), recovery: null, review: null, failure: null, notice: null,
+        : { ...previous, application, draft: draftOf(application), recovery: null, review: null, failure: null, notice: null, mutationKind: null, deleteConfirm: false,
           history: [], historyCursor: null, historyError: false, focusTarget: 'application-editor-heading' });
-    } catch { if (read.current()) setState(previous => ({ ...previous, detailError: review ? 'review' : 'load', focusTarget: 'application-detail-error' })); }
+    } catch (error) { if (read.current()) setState(previous => ({ ...previous,
+      detailError: error instanceof ApplicationFailure && error.status === 404 ? 'unavailable' : review ? 'review' : 'load', focusTarget: 'application-detail-error' })); }
     finally { if (read.current()) setState(previous => ({ ...previous, loading: false })); read.finish(); }
     if (loaded && !review && read.current()) void history();
   }
@@ -109,29 +111,26 @@ export function useApplicationEditor(store: AuthStore, api: ApplicationsApi, onS
     owner.abort?.abort(); owner.read++; owner.reading = null; owner.selectedId = id; owner.selection++;
     setState({ ...empty(), selectedId: id, focusTarget: 'application-editor-heading' }); void details();
   }
-  function close() {
+  function close(restoreFocus = true) {
     const owner = lifetime.current;
-    if (owner.saving || !admitted() || !consent()) return;
+    if (owner.saving || !admitted() || !consent()) return false;
     const id = owner.selectedId;
     owner.abort?.abort(); owner.read++; owner.reading = null; owner.selectedId = null; owner.selection++;
-    setState(empty());
-    queueMicrotask(() => {
-      if (owner.active && !owner.selectedId && admitted())
-        (document.getElementById(`edit-application-${id}`) ?? document.getElementById('applications-heading'))?.focus();
-    });
+    setState({ ...empty(), focusTarget: restoreFocus ? `edit-application-${id}` : null });
+    return true;
   }
   function setDraft(value: SetStateAction<ApplicationDraft>) {
-    if (lifetime.current.saving || state.recovery || !admitted()) return;
+    if (state.selectedId !== lifetime.current.selectedId || lifetime.current.saving || state.recovery || state.deleteConfirm || state.application?.archivedAt || !admitted()) return;
     setState(previous => previous.draft ? { ...previous, draft: typeof value === 'function' ? value(previous.draft) : value, notice: null } : previous);
   }
   function save(input: UpdateApplicationRequest, canSubmit: () => boolean) {
     const owner = lifetime.current;
-    if (!owner.active || !owner.selectedId || owner.saving || owner.reading || !state.application || state.recovery
+    if (!owner.active || !owner.selectedId || owner.saving || owner.reading || !state.application || state.application.id !== owner.selectedId || state.application.archivedAt || state.deleteConfirm || state.recovery
       || !admitted() || !canSubmit() || input.expectedVersion !== state.application.version
       || (state.failure?.retryAt && state.failure.retryAt > Date.now())) return;
     const id = owner.selectedId, selection = owner.selection, ticket = ++owner.mutation, previous = state.application;
     owner.saving = true;
-    setState(current => ({ ...current, saving: true, failure: null, notice: null, review: null }));
+    setState(current => ({ ...current, saving: true, mutationKind: 'save', failure: null, notice: null, review: null }));
     const current = () => owner.active && lifetime.current === owner && owner.selection === selection && owner.mutation === ticket;
     let statusChanged = false;
     void api.update(id, input).then(({ application }) => {
@@ -153,9 +152,46 @@ export function useApplicationEditor(store: AuthStore, api: ApplicationsApi, onS
       if (statusChanged) void history();
     });
   }
+  function changeLifecycle(kind: 'archive' | 'restore' | 'delete', canSubmit: () => boolean) {
+    const owner = lifetime.current, previous = state.application;
+    if (!owner.active || !owner.selectedId || owner.saving || owner.reading || !previous || previous.id !== owner.selectedId || state.recovery
+      || !admitted() || !canSubmit() || (state.failure?.retryAt && state.failure.retryAt > Date.now())) return;
+    if (kind === 'archive' ? previous.archivedAt !== null : previous.archivedAt === null) return;
+    if (state.deleteConfirm && kind !== 'delete') return;
+    if (kind === 'delete' && !state.deleteConfirm) return;
+    if (kind === 'archive' && !consent()) return;
+    const id = owner.selectedId, selection = owner.selection, ticket = ++owner.mutation;
+    owner.saving = true;
+    setState(value => ({ ...value, saving: true, mutationKind: kind, failure: null, notice: null, review: null }));
+    const current = () => owner.active && lifetime.current === owner && owner.selection === selection && owner.mutation === ticket;
+    const result = kind === 'delete' ? api.delete(id, { expectedVersion: previous.version, confirmPermanentDeletion: true })
+      : api[kind](id, { expectedVersion: previous.version });
+    void result.then(response => {
+      if (!current()) return;
+      if (!admitted()) throw new ApplicationFailure('unknown');
+      if ('application' in response) onSaved(response.application, kind === 'delete' ? undefined : kind); else onDeleted?.(response.deletedApplicationId);
+      // Confirmed success is the first point at which the draft may be discarded.
+      owner.selectedId = null; owner.selection++; owner.saving = false;
+      setState({ ...empty(), focusTarget: 'applications-heading' });
+    }).catch(error => {
+      if (!current()) return;
+      const failure = error instanceof ApplicationFailure ? error : new ApplicationFailure('unknown');
+      setState(value => ({ ...value, failure, deleteConfirm: false, focusTarget: 'application-edit-feedback',
+        recovery: failure.kind === 'unknown' ? 'unknown' : failure.status === 404 || failure.status === 409 ? 'conflict' : null }));
+    }).finally(() => { if (current()) { owner.saving = false; setState(value => ({ ...value, saving: false })); } });
+  }
   return { ...state, dirty, open, close, setDraft, save, confirmLeave: consent,
+    closeForView: () => close(false),
+    archive: (canSubmit: () => boolean) => changeLifecycle('archive', canSubmit),
+    restore: (canSubmit: () => boolean) => changeLifecycle('restore', canSubmit),
+    deletePermanently: (canSubmit: () => boolean) => changeLifecycle('delete', canSubmit),
+    requestDeletion: () => {
+      if (admitted() && state.application?.id === lifetime.current.selectedId && !lifetime.current.saving && !lifetime.current.reading && !state.recovery && state.application?.archivedAt)
+        setState(previous => ({ ...previous, deleteConfirm: true, focusTarget: 'application-delete-cancel' }));
+    },
+    cancelDeletion: () => { if (!lifetime.current.saving) setState(previous => ({ ...previous, deleteConfirm: false, focusTarget: 'application-delete-action' })); },
     acknowledgeFocus: () => setState(previous => ({ ...previous, focusTarget: null })),
-    retryDetails: () => { void details(state.detailError === 'review'); },
+    retryDetails: () => { void details(state.recovery !== null || state.detailError === 'review'); },
     reload: () => { if (!lifetime.current.saving && !lifetime.current.reading && admitted() && consent()) void details(); },
     reviewSaved: () => { void details(true); },
     retryHistory: () => { void history(state.historyRetryCursor !== null, state.historyRetryCursor, true); },

@@ -2,9 +2,10 @@ import { readFile } from 'node:fs/promises';
 import type * as Fs from 'node:fs/promises';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { assertApprovedChain, assertDeploymentApproval, baselineChecksum, initialChecksum, historyChecksum, migrationChain,
-  applicationBaselineChecksum, applicationChecksum, sqlDigest, statusHistoryDiff,
+  applicationBaselineChecksum, applicationChecksum, historyBaselineChecksum, lifecycleChecksum, lifecycleDiff,
+  sqlDigest, statusHistoryDiff,
   validateMigrationDirectory, validateMigrationHistory, validateMigrationTables,
-  verifyMigrationFiles, wrapApplicationDiff, wrapStatusHistoryDiff, type MigrationSpec } from './migration-policy.js';
+  verifyMigrationFiles, wrapApplicationDiff, wrapStatusHistoryDiff, wrapLifecycleDiff, type MigrationSpec } from './migration-policy.js';
 
 const files = vi.hoisted(() => ({ read: vi.fn(), list: vi.fn() }));
 vi.mock('node:fs/promises', async (original) => ({ ...await original<typeof Fs>(), readFile: files.read, readdir: files.list }));
@@ -16,19 +17,20 @@ beforeEach(() => {
 
 describe('version/history schema foundation without a database', () => {
   const historySql = () => readFile(new URL('../prisma/migrations/0003_application_status_history/migration.sql', import.meta.url), 'utf8');
-  it('recognizes source approval only with the exact third checksum and completed history', () => {
+  it('recognizes source approval only with the exact fourth checksum and completed history', () => {
+    expect(migrationChain.slice(0, 3).every(entry => entry.approval === 'APPROVED')).toBe(true);
     expect(() => assertApprovedChain()).not.toThrow();
-    expect(() => assertDeploymentApproval(['--approved-sql-sha256', historyChecksum])).not.toThrow();
-    expect(validateMigrationHistory(rows())).toBe(3);
-    expect(() => assertDeploymentApproval(['--approved-sql-sha256', applicationChecksum])).toThrow('exact third');
-    expect(() => validateMigrationHistory(rows().slice(0, 2))).toThrow('Missing or extra');
+    expect(() => assertDeploymentApproval(['--approved-sql-sha256', lifecycleChecksum])).not.toThrow();
+    expect(validateMigrationHistory(rows())).toBe(4);
+    expect(() => assertDeploymentApproval(['--approved-sql-sha256', historyChecksum], approved)).toThrow('exact fourth');
+    expect(() => validateMigrationHistory(rows().slice(0, 3), { chain: approved })).toThrow('Missing or extra');
   });
   it('rejects substituted old and new pinned digests, even in an approved fixture', () => {
-    for (const index of [0, 1, 2]) {
+    for (const index of [0, 1, 2, 3]) {
       const changed = approved.map((entry, i) => i === index ? { ...entry, sha256: 'f'.repeat(64) } : entry);
       expect(() => assertApprovedChain(changed)).toThrow('Unexpected migration-chain');
     }
-    expect(() => assertDeploymentApproval(['--approved-sql-sha256', applicationChecksum], approved)).toThrow('exact third');
+    expect(() => assertDeploymentApproval(['--approved-sql-sha256', applicationChecksum], approved)).toThrow('exact fourth');
   });
   it('pins the full pre-version schema and leaves authentication model definitions intact', async () => {
     const previous = await readFile(new URL('../prisma/baselines/0002_job_applications.prisma', import.meta.url), 'utf8');
@@ -84,7 +86,8 @@ describe('version/history schema foundation without a database', () => {
     expect(() => validateMigrationTables(tables, 2)).toThrow();
     expect(() => validateMigrationTables(tables.slice(0, 4), 3)).toThrow();
   });
-  it.each(['baselines/0001_init_auth.prisma', 'baselines/0002_job_applications.prisma'])('refuses changed baseline bytes: %s', async suffix => {
+  it.each(['baselines/0001_init_auth.prisma', 'baselines/0002_job_applications.prisma',
+    'baselines/0003_application_status_history.prisma'])('refuses changed baseline bytes: %s', async suffix => {
     files.read.mockImplementation(async (path: Parameters<typeof actualFs.readFile>[0]) => {
       const bytes = await actualFs.readFile(path);
       return String(path).replace(/\\/g, '/').endsWith(suffix) ? Buffer.concat([bytes, Buffer.from('changed')]) : bytes;
@@ -93,14 +96,68 @@ describe('version/history schema foundation without a database', () => {
   });
 });
 
+// Retain pending-state coverage after source approval using an explicit fixture.
 const approved: readonly MigrationSpec[] = migrationChain;
-const pending: readonly MigrationSpec[] = migrationChain.map((entry) => entry.name === '0003_application_status_history'
-  ? { ...entry, approval: 'REVIEW_PENDING' } : entry);
+const pending: readonly MigrationSpec[] = migrationChain.map(entry => entry.name === '0004_application_lifecycle'
+  ? { ...entry, approval: 'REVIEW_PENDING' as const } : entry);
 const rows = () => approved.map((entry, index) => ({ migration_name: entry.name, checksum: entry.sha256,
   started_at: new Date(1000 + index * 2000), finished_at: new Date(2000 + index * 2000),
   rolled_back_at: null, applied_steps_count: 1, logs: null }));
 const readSql = () => readFile(new URL('../prisma/migrations/0002_job_applications/migration.sql', import.meta.url), 'utf8');
 function unwrap(sql: string) { return sql.slice('BEGIN;\n\n'.length, sql.indexOf('\n\n-- Require a date')).concat('\n'); }
+
+describe('nullable archive foundation without a database', () => {
+  it('freezes the full pre-archive schema and adds only the nullable timestamp', async () => {
+    const previous = await readFile(new URL('../prisma/baselines/0003_application_status_history.prisma', import.meta.url), 'utf8');
+    const schema = (await readFile(new URL('../prisma/schema.prisma', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
+    expect(sqlDigest(previous)).toBe(historyBaselineChecksum);
+    const archiveField = '  archivedAt      DateTime?         @db.Timestamptz(3)\n';
+    expect(schema.split(archiveField)).toHaveLength(2);
+    expect(schema.replace(archiveField, '')).toBe(previous);
+    expect(schema.slice(schema.indexOf('model JobApplication'), schema.indexOf('model ApplicationStatusHistory'))).toContain(archiveField);
+  });
+  it('pins exactly the one-column transactional migration with no data backfill', async () => {
+    const sql = await readFile(new URL('../prisma/migrations/0004_application_lifecycle/migration.sql', import.meta.url), 'utf8');
+    const raw = sql.slice('BEGIN;\n\n'.length, -'\n\nCOMMIT;\n'.length);
+    expect(wrapLifecycleDiff(raw)).toBe(sql);
+    expect(sqlDigest(sql)).toBe(lifecycleChecksum);
+    expect(sql).toBe('BEGIN;\n\n-- AlterTable\nALTER TABLE "JobApplication" ADD COLUMN     "archivedAt" TIMESTAMPTZ(3);\n\nCOMMIT;\n');
+    expect(sql).not.toMatch(/\b(?:DEFAULT|NOT NULL|INSERT|UPDATE|DELETE|DROP|TRUNCATE|INDEX|REFERENCES)\b/);
+  });
+  it.each([
+    lifecycleDiff.replace('TIMESTAMPTZ(3)', 'TIMESTAMP(3)'),
+    lifecycleDiff.replace('TIMESTAMPTZ(3)', 'TIMESTAMPTZ(6)'),
+    lifecycleDiff.replace('TIMESTAMPTZ(3)', 'TIMESTAMPTZ(3) NOT NULL'),
+    lifecycleDiff.replace('TIMESTAMPTZ(3)', 'TIMESTAMPTZ(3) DEFAULT CURRENT_TIMESTAMP'),
+    lifecycleDiff.replace('archivedAt', 'deletedAt'),
+    lifecycleDiff.replace('JobApplication', 'User'),
+    lifecycleDiff + '\nUPDATE "JobApplication" SET "archivedAt" = now();',
+    lifecycleDiff + '\nDELETE FROM "ApplicationStatusHistory";',
+    lifecycleDiff + '\nDROP TABLE "Session";',
+    lifecycleDiff + '\nCREATE INDEX "other" ON "JobApplication" ("archivedAt");',
+    lifecycleDiff + '\n' + lifecycleDiff,
+    ''
+  ])('rejects any broader or changed archive diff %#', sql => {
+    expect(() => wrapLifecycleDiff(sql)).toThrow('Unexpected lifecycle diff');
+  });
+  it('requires the exact fourth directory while retaining the three-migration schema inventory', () => {
+    const prefix = ['migration_lock.toml', ...migrationChain.slice(0, 3).map(entry => entry.name)];
+    expect(() => validateMigrationDirectory(prefix, 3)).not.toThrow();
+    expect(() => validateMigrationDirectory(prefix, 4)).toThrow();
+    expect(() => validateMigrationDirectory([...prefix, '0004_application_lifecycle'], 4)).not.toThrow();
+    expect(() => validateMigrationDirectory([...prefix, '0004_application_lifecycle'], 3)).toThrow();
+    const tables = ['User', 'Session', '_prisma_migrations', 'JobApplication', 'ApplicationStatusHistory'];
+    expect(() => validateMigrationTables(tables, 4)).not.toThrow();
+    expect(() => validateMigrationTables([...tables, 'Other'], 4)).toThrow();
+    expect(() => validateMigrationTables(tables.slice(0, -1), 4)).toThrow();
+  });
+  it.each([{ finished_at: null }, { checksum: 'f'.repeat(64) }, { rolled_back_at: new Date() },
+    { started_at: new Date(1), finished_at: new Date(2) }, { applied_steps_count: 0 }, { logs: 'failed' }])(
+    'rejects invalid fourth metadata after the completed three-migration prefix %#', change => {
+      const history = rows().map((row, index) => index === 3 ? { ...row, ...change } : row);
+      expect(() => validateMigrationHistory(history, { chain: approved, allowInitialPrefix: true })).toThrow();
+    });
+});
 
 describe('exact source-approved migration chain', () => {
   it('pins only the reviewed names and bytes in the immutable source manifest', async () => {
@@ -110,7 +167,8 @@ describe('exact source-approved migration chain', () => {
     expect(migrationChain).toEqual([
       { name: '0001_init_auth', sha256: '98fab302c1f9d6a053d549bdbb9aec2bece4e24322fb1292948647ed693ac840', approval: 'APPROVED' },
       { name: '0002_job_applications', sha256: '74e056f699c2781c01f12d3195ed119074d5b0d4d04fef979c185e17d775a333', approval: 'APPROVED' },
-      { name: '0003_application_status_history', sha256: historyChecksum, approval: 'APPROVED' }
+      { name: '0003_application_status_history', sha256: historyChecksum, approval: 'APPROVED' },
+      { name: '0004_application_lifecycle', sha256: lifecycleChecksum, approval: 'APPROVED' }
     ]);
     expect(Object.isFrozen(migrationChain)).toBe(true);
     expect(migrationChain.every(Object.isFrozen)).toBe(true);
@@ -130,10 +188,14 @@ describe('exact source-approved migration chain', () => {
     .map((args) => ({ args })))('rejects wrong approval arguments %#', ({ args }) => {
     expect(() => assertDeploymentApproval(args, approved)).toThrow();
   });
-  it('requires the exact digest of the separately approved third migration', () => {
-    expect(() => assertDeploymentApproval(['--approved-sql-sha256', approved[2]!.sha256!], approved)).not.toThrow();
+  it('requires the exact fourth digest after separate source approval', () => {
+    expect(() => assertDeploymentApproval(['--approved-sql-sha256', approved[3]!.sha256!], approved)).not.toThrow();
+    for (const entry of approved.slice(0, 3)) {
+      expect(() => assertDeploymentApproval(['--approved-sql-sha256', entry.sha256!], approved)).toThrow('exact fourth');
+    }
   });
-  it.each(['0001_init_auth', '0002_job_applications', '0003_application_status_history'])('rejects altered %s bytes without writing files', async (name) => {
+  it.each(['0001_init_auth', '0002_job_applications', '0003_application_status_history',
+    '0004_application_lifecycle'])('rejects altered %s bytes without writing files', async (name) => {
     files.read.mockImplementation(async (path: Parameters<typeof actualFs.readFile>[0]) => {
       const bytes = await actualFs.readFile(path);
       return String(path).replace(/\\/g, '/').endsWith(`${name}/migration.sql`)
@@ -147,9 +209,9 @@ describe('exact source-approved migration chain', () => {
     await expect(verifyMigrationFiles()).rejects.toThrow('Missing or unexpected migration files');
   });
   it.each([[], [...approved].reverse(), [...approved, approved[1]!],
-    [approved[0]!, { ...approved[1]!, sha256: null }, approved[2]!],
-    [approved[0]!, { ...approved[1]!, sha256: 'x' }, approved[2]!],
-    [{ ...approved[0]!, sha256: 'a'.repeat(64) }, approved[1]!, approved[2]!]]
+    approved.map((entry, index) => index === 1 ? { ...entry, sha256: null } : entry),
+    approved.map((entry, index) => index === 1 ? { ...entry, sha256: 'x' } : entry),
+    approved.map((entry, index) => index === 0 ? { ...entry, sha256: 'a'.repeat(64) } : entry)]
     .map((chain) => ({ chain })))('rejects invalid chain definition %#', ({ chain }) => {
     expect(() => assertApprovedChain(chain)).toThrow();
   });
@@ -158,8 +220,10 @@ describe('exact source-approved migration chain', () => {
     expect(() => validateMigrationHistory(rows().slice(0, 1), { chain: approved })).toThrow();
     expect(validateMigrationHistory(rows().slice(0, 2), { chain: approved, allowInitialPrefix: true })).toBe(2);
     expect(() => validateMigrationHistory(rows().slice(0, 2), { chain: approved })).toThrow();
-    expect(validateMigrationHistory(rows(), { chain: approved })).toBe(3);
-    expect(validateMigrationHistory(rows().reverse(), { chain: approved })).toBe(3);
+    expect(validateMigrationHistory(rows().slice(0, 3), { chain: approved, allowInitialPrefix: true })).toBe(3);
+    expect(() => validateMigrationHistory(rows().slice(0, 3), { chain: approved })).toThrow();
+    expect(validateMigrationHistory(rows(), { chain: approved })).toBe(4);
+    expect(validateMigrationHistory(rows().reverse(), { chain: approved })).toBe(4);
   });
   it.each([
     [], rows().slice(1), [rows()[0], rows()[0]], [...rows(), rows()[1]],
