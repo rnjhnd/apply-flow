@@ -28,7 +28,7 @@ async function start(options: { listed?: Application[]; detail?: Application; br
   const history = vi.fn<(url: string) => Promise<Response>>().mockResolvedValue(json({ items: [], nextCursor: null }));
   const detail = vi.fn<(id: string) => Promise<Response>>().mockImplementation(async id => json({ application: { ...saved, id } }));
   const list = vi.fn<(url: string) => Promise<Response>>().mockImplementation(async () => json({
-    items: auth.store.getSnapshot().user?.id === user.id ? options.listed ?? [row] : [], nextCursor: null
+    items: auth.store.getSnapshot().user?.id === user.id ? (options.listed ?? [row]).map(item => put.mock.calls.length && item.id === saved.id ? saved : item) : [], nextCursor: null
   }));
   const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
     const target = String(url);
@@ -116,7 +116,7 @@ describe('accessible workspace editor through the real authenticated gateway', (
     expect(f.put.mock.calls[0]![0]).toEqual({ company: 'Edited company', jobTitle: row.jobTitle, status: 'SAVED', applicationDate: null,
       location: row.location, jobUrl: row.jobUrl, notes: 'Keep\n  formatting', expectedVersion: 1 });
     expect(within(screen.getByRole('region', { name: 'Your applications' })).getByText('Edited company')).toBeTruthy();
-    expect(f.list).toHaveBeenCalledOnce(); expect(f.history).toHaveBeenCalledOnce(); expect(f.put).toHaveBeenCalledOnce();
+    expect(f.list).toHaveBeenCalledTimes(2); expect(f.history).toHaveBeenCalledOnce(); expect(f.put).toHaveBeenCalledOnce();
   });
   it('reports a no-op honestly and preserves its revision', async () => {
     const f = await start(); await f.open();
