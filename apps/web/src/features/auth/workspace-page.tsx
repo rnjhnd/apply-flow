@@ -37,7 +37,8 @@ function WorkspaceView({ logout, applications, editor }: { logout: (canSubmit: (
   const admission = useAuthAdmission();
   const { state } = useAuth();
   const enter = applications.enter;
-  useEffect(() => { enter(); }, [enter]);
+  const editorIdle = !editor.saving && !editor.loading && !editor.historyLoading && !editor.deleteConfirm;
+  useEffect(() => { enter(editorIdle); }, [enter, editorIdle]);
   const target = editor.focusTarget, acknowledgeFocus = editor.acknowledgeFocus;
   useEffect(() => {
     if (editor.selectedId || !target) return;
@@ -67,7 +68,7 @@ function WorkspaceView({ logout, applications, editor }: { logout: (canSubmit: (
       {editor.selectedId ? <ApplicationEditor controller={editor} /> : applications.view === 'active' ? <ApplicationForm controller={applications} />
         : <div className="space-y-3"><h2 className="font-heading text-2xl font-semibold">Kept for later</h2>
           <p className="text-sm leading-7 text-muted-foreground">Archived applications keep their details, status and history. Open one to restore it or permanently remove it.</p></div>}
-      <ApplicationList controller={applications} onEdit={editor.open} selectedId={editor.selectedId} editBusy={editor.saving || editor.loading || editor.historyLoading || editor.deleteConfirm} />
+      <ApplicationList controller={applications} onEdit={editor.open} selectedId={editor.selectedId} editBusy={!admission.allowed || !editorIdle} />
     </div>
     <Button variant="outline" disabled={!admission.allowed || editor.saving} onClick={() => { if (editor.confirmLeave()) logout(admission.canSubmit); }}>Sign out</Button>
     <p className="text-xs leading-6 text-muted-foreground">Signing out ends this browser’s current session. Your other devices stay signed in.</p>

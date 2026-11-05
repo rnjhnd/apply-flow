@@ -14,6 +14,29 @@ async function fixture() {
   return { auth, fetcher, api };
 }
 
+describe('search/filter list transport', () => {
+  it('encodes normalized literal search and a single status with existing view/cursor/limit', async () => {
+    const f = await fixture(); f.fetcher.mockResolvedValue(json({ items: [], nextCursor: null }));
+    try {
+      await f.api.list({ q: '  R&D  %_\\\'"  ', status: 'INTERVIEW', view: 'archived', limit: 2, cursor: 'abc_DEF-123' });
+      const url = new URL(String(f.fetcher.mock.calls[0]![0]), 'https://example.invalid');
+      expect(Object.fromEntries(url.searchParams)).toEqual({ q: 'R&D  %_\\\'"', status: 'INTERVIEW', view: 'archived', limit: '2', cursor: 'abc_DEF-123' });
+      expect(url.searchParams.getAll('q')).toHaveLength(1); expect(f.fetcher).toHaveBeenCalledOnce();
+      expect(f.fetcher.mock.calls[0]![1]).toMatchObject({ method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error' });
+    } finally { f.auth.store.dispose(); }
+  });
+  it.each([{}, { q: '' }, { q: ' \t\n ' }])('omits inactive filters for %#', async query => {
+    const f = await fixture(); f.fetcher.mockResolvedValue(json({ items: [], nextCursor: null }));
+    try { await f.api.list(query); expect(f.fetcher.mock.calls[0]![0]).toBe('/api/applications?limit=20'); }
+    finally { f.auth.store.dispose(); }
+  });
+  it.each([{ q: 'x'.repeat(201) }, { q: '\ud800' }, { q: '\u0000' }, { status: 'ALL' }, { status: ['SAVED'] }])('rejects invalid filter input before dispatch %#', async query => {
+    const f = await fixture();
+    try { await expect(f.api.list(query)).rejects.toMatchObject({ kind: 'validation' }); expect(f.fetcher).not.toHaveBeenCalled(); }
+    finally { f.auth.store.dispose(); }
+  });
+});
+
 describe('lifecycle transport', () => {
   it.each(['archive', 'restore', 'delete'] as const)('sends one strict %s request with session proof and validates the target', async kind => {
     const f = await fixture();

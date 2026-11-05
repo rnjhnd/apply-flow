@@ -99,8 +99,13 @@ export const applicationCursorSchema = z.string().min(1).max(256).regex(/^[A-Za-
 const listLimit = z.union([z.number(), z.string().regex(/^[1-9]\d?$/)
   .refine((value) => value === String(Number(value))).transform(Number)])
   .pipe(z.number().int().min(1).max(50));
+// Validate Unicode before trimming, then apply the limit to the normalized query.
+// A blank search is equivalent to omitting q; internal whitespace stays literal.
+const applicationSearch = text(Number.MAX_SAFE_INTEGER).transform(value => value.trim())
+  .pipe(text(200)).transform(value => value || undefined);
 export const listApplicationsQuerySchema = z.strictObject({
-  limit: listLimit.default(20), cursor: applicationCursorSchema.optional(), view: applicationViewSchema.default('active')
+  limit: listLimit.default(20), cursor: applicationCursorSchema.optional(), view: applicationViewSchema.default('active'),
+  q: applicationSearch.optional(), status: applicationStatusSchema.optional()
 });
 export const listApplicationsResponseSchema = z.strictObject({
   items: z.array(applicationSchema).max(50), nextCursor: applicationCursorSchema.nullable()

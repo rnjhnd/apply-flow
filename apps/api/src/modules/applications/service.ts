@@ -236,11 +236,19 @@ export function createApplicationService(database: ApplicationDatabase, options:
       return safely(async () => {
         const parsed = listApplicationsQuerySchema.safeParse(input);
         if (!parsed.success) throw new ApplicationHttpError(400, 'INVALID_REQUEST', 'Invalid application list query.');
-        const { limit, cursor, view } = parsed.data;
+        const { limit, cursor, view, q, status } = parsed.data;
         const boundary = cursor === undefined ? null : decodeApplicationCursor(cursor);
+        // Prisma contains adds the surrounding % but preserves pattern characters.
+        // Escape PostgreSQL LIKE/ILIKE's escape character and both wildcards first.
+        const search = q?.replace(/[\\%_]/g, '\\$&');
         return database.$transaction(async transaction => {
           const userId = await owner(transaction, proof, false);
-          const rows = await transaction.jobApplication.findMany({ where: { userId, archivedAt: view === 'active' ? null : { not: null }, ...(boundary ? {
+          const rows = await transaction.jobApplication.findMany({ where: { userId, archivedAt: view === 'active' ? null : { not: null },
+            ...(status ? { status } : {}),
+            ...(search === undefined ? {} : { AND: [{ OR: [
+              { company: { contains: search, mode: 'insensitive' as const } },
+              { jobTitle: { contains: search, mode: 'insensitive' as const } }
+            ] }] }), ...(boundary ? {
             OR: [{ createdAt: { lt: boundary.createdAt } }, { createdAt: boundary.createdAt, id: { lt: boundary.id } }]
           } : {}) }, select: selection, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: limit + 1 });
           const items = rows.slice(0, limit);

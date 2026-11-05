@@ -130,6 +130,130 @@ describe('page-owned application lifecycle', () => {
   });
 });
 
+describe('workspace-owned search and filter state', () => {
+  it('keeps draft changes local and paginates using the applied filter snapshot', async () => {
+    const f = await fixture();
+    act(() => f.result.current.setFilterDraft({ q: ' Acme ', status: 'SAVED' }));
+    expect(f.api.list).not.toHaveBeenCalled(); expect(f.result.current.appliedFilters).toEqual({});
+    f.api.list.mockResolvedValueOnce({ items: [row], nextCursor: 'next' });
+    await act(async () => { f.result.current.applyFilters(); });
+    expect(f.api.list.mock.calls[0]![0]).toEqual({ q: 'Acme', status: 'SAVED' });
+    expect(f.result.current.filterDraft).toEqual({ q: 'Acme', status: 'SAVED' });
+    act(() => f.result.current.setFilterDraft({ q: 'Unsubmitted', status: 'INTERVIEW' }));
+    await act(async () => { f.result.current.loadMore(); });
+    expect(f.api.list.mock.calls[1]![0]).toEqual({ q: 'Acme', status: 'SAVED', cursor: 'next' });
+    expect(f.result.current.filtersChanged).toBe(true);
+  });
+  it('clears draft and applied filters immediately, starts page one and rejects late canceled pages', async () => {
+    const f = await fixture(); f.api.list.mockResolvedValueOnce({ items: [row], nextCursor: 'next' });
+    act(() => f.result.current.setFilterDraft({ q: 'Acme', status: 'SAVED' }));
+    await act(async () => { f.result.current.applyFilters(); });
+    const gate = deferred<{ items: Application[]; nextCursor: string | null }>();
+    f.api.list.mockReturnValueOnce(gate.promise).mockResolvedValueOnce({ items: [], nextCursor: null });
+    act(() => f.result.current.loadMore()); expect(f.result.current.loadingMore).toBe(true);
+    await act(async () => { f.result.current.clearFilters(); });
+    expect(f.api.list.mock.calls[1]![1]?.aborted).toBe(true); expect(f.api.list.mock.calls[2]![0]).toEqual({});
+    await act(async () => { gate.resolve({ items: [row], nextCursor: 'late' }); });
+    expect(f.result.current.items).toEqual([]); expect(f.result.current.nextCursor).toBeNull();
+    expect(f.result.current.filterDraft).toEqual({ q: '', status: '' }); expect(f.result.current.appliedFilters).toEqual({});
+  });
+  it('rejects late first-page successes and errors after new filters, even when the port ignores abort', async () => {
+    const f = await fixture(), old = deferred<{ items: Application[]; nextCursor: string | null }>();
+    f.api.list.mockReturnValueOnce(old.promise).mockResolvedValueOnce({ items: [row], nextCursor: null });
+    act(() => { f.result.current.setFilterDraft({ q: 'Old', status: '' }); f.result.current.applyFilters(); });
+    await act(async () => { f.result.current.setFilterDraft({ q: 'New', status: '' }); f.result.current.applyFilters(); });
+    await act(async () => { old.reject(new ApplicationFailure('http', 503)); });
+    expect(f.result.current.items).toEqual([row]); expect(f.result.current.appliedFilters).toEqual({ q: 'New' }); expect(f.result.current.listError).toBe(false);
+    const late = deferred<{ items: Application[]; nextCursor: string | null }>(); f.api.list.mockReturnValueOnce(late.promise);
+    act(() => f.result.current.refresh());
+    await act(async () => { f.result.current.setFilterDraft({ q: 'Newest', status: '' }); f.result.current.applyFilters(); });
+    await act(async () => { late.resolve({ items: [], nextCursor: 'wrong' }); });
+    expect(f.result.current.items).toEqual([]); expect(f.result.current.nextCursor).toBeNull(); expect(f.result.current.appliedFilters).toEqual({ q: 'Newest' });
+  });
+  it('remembers independent draft/applied filters but never caches inactive pages or cursors', async () => {
+    const f = await fixture();
+    act(() => { f.result.current.setFilterDraft({ q: 'Active', status: 'SAVED' }); });
+    await act(async () => { f.result.current.applyFilters(); });
+    act(() => f.result.current.setFilterDraft({ q: 'Active draft', status: '' }));
+    await act(async () => { f.result.current.switchView('archived'); });
+    expect(f.result.current.filterDraft).toEqual({ q: '', status: '' });
+    act(() => f.result.current.setFilterDraft({ q: 'Archived', status: 'OFFER' }));
+    await act(async () => { f.result.current.applyFilters(); });
+    act(() => f.result.current.setFilterDraft({ q: 'Archived draft', status: '' }));
+    await act(async () => { f.result.current.switchView('active'); });
+    expect(f.result.current.filterDraft.q).toBe('Active draft'); expect(f.api.list.mock.calls.at(-1)![0]).toEqual({ q: 'Active', status: 'SAVED' });
+    await act(async () => { f.result.current.switchView('archived'); });
+    expect(f.result.current.filterDraft.q).toBe('Archived draft'); expect(f.api.list.mock.calls.at(-1)![0]).toEqual({ view: 'archived', q: 'Archived', status: 'OFFER' });
+  });
+  it.each(['logout', 'replacement'] as const)('clears both views and rejects late search results after %s', async outcome => {
+    const f = await fixture();
+    act(() => f.result.current.setFilterDraft({ q: 'A private', status: 'SAVED' }));
+    await act(async () => { f.result.current.applyFilters(); f.result.current.switchView('archived'); });
+    act(() => f.result.current.setFilterDraft({ q: 'A archived', status: 'OFFER' }));
+    const late = deferred<{ items: Application[]; nextCursor: string | null }>(); f.api.list.mockReturnValueOnce(late.promise);
+    act(() => f.result.current.applyFilters());
+    if (outcome === 'logout') await act(async () => { await f.auth.store.logout(); });
+    else { f.auth.api.me.mockResolvedValue({ user: { ...user, id: row.id } }); await act(async () => { await f.auth.store.revalidate(); }); }
+    await act(async () => { late.resolve({ items: [row], nextCursor: 'A-only' }); });
+    expect(f.result.current.view).toBe('active'); expect(f.result.current.items).toEqual([]); expect(f.result.current.appliedFilters).toEqual({});
+    expect(f.result.current.filterDraft).toEqual({ q: '', status: '' });
+    if (outcome === 'replacement') { await act(async () => { f.result.current.switchView('archived'); }); expect(f.result.current.filterDraft.q).toBe(''); expect(f.result.current.hasFilters).toBe(false); }
+  });
+  it('preserves draft and applied values through same-account verification', async () => {
+    const f = await fixture();
+    act(() => f.result.current.setFilterDraft({ q: 'Applied', status: 'SAVED' }));
+    await act(async () => { f.result.current.applyFilters(); });
+    act(() => f.result.current.setFilterDraft({ q: 'Private draft', status: 'OFFER' }));
+    await act(async () => { await f.auth.store.revalidate(); });
+    expect(f.result.current.filterDraft.q).toBe('Private draft'); expect(f.result.current.appliedFilters).toEqual({ q: 'Applied', status: 'SAVED' });
+  });
+  it('validates without dispatch and preserves applied filters when the draft is invalid', async () => {
+    const f = await fixture();
+    act(() => { f.result.current.setFilterDraft({ q: '\ud83d\ude00'.repeat(201), status: '' }); f.result.current.applyFilters(); });
+    expect(f.result.current.filterError).toBe(true); expect(f.result.current.focusTarget).toBe('application-search-q'); expect(f.api.list).not.toHaveBeenCalled();
+    act(() => f.result.current.setFilterDraft({ q: '\ud83d\ude00'.repeat(200), status: '' }));
+    await act(async () => { f.result.current.applyFilters(); }); expect(f.api.list).toHaveBeenCalledOnce();
+  });
+  it('defers filter-relevant edit reconciliation until editor work settles and keeps save success separate from read failure', async () => {
+    const f = await fixture();
+    act(() => f.result.current.setFilterDraft({ q: 'Acme', status: 'SAVED' }));
+    f.api.list.mockResolvedValueOnce({ items: [row], nextCursor: 'next' });
+    await act(async () => { f.result.current.applyFilters(); });
+    act(() => { f.result.current.replaceItem({ ...row, company: 'Changed', version: 2 }, undefined, row); f.result.current.enter(false); });
+    expect(f.api.list).toHaveBeenCalledOnce();
+    f.api.list.mockRejectedValueOnce(new ApplicationFailure('http', 503));
+    await act(async () => { f.result.current.enter(true); });
+    expect(f.api.list.mock.calls[1]![0]).toEqual({ q: 'Acme', status: 'SAVED' });
+    expect(f.result.current.listError).toBe(true); expect(f.result.current.failure).toBeNull(); expect(f.result.current.nextCursor).toBeNull();
+    await act(async () => { f.result.current.enter(); }); expect(f.api.list).toHaveBeenCalledTimes(2);
+  });
+  it('retains filters on creation success even if refreshing them fails; never replays the create', async () => {
+    const f = await fixture();
+    act(() => f.result.current.setFilterDraft({ q: 'Other', status: 'OFFER' }));
+    await act(async () => { f.result.current.applyFilters(); });
+    f.api.list.mockRejectedValueOnce(new ApplicationFailure('http', 503));
+    await act(async () => { f.result.current.save(input, () => true); });
+    expect(f.result.current.message).toContain('Application saved.'); expect(f.result.current.message).toContain('filters are still applied');
+    expect(f.result.current.listError).toBe(true); expect(f.result.current.appliedFilters).toEqual({ q: 'Other', status: 'OFFER' });
+    expect(f.api.create).toHaveBeenCalledOnce(); expect(f.result.current.failure).toBeNull();
+  });
+  it('keeps loaded items and the applied cursor after a load-more error', async () => {
+    const f = await fixture(); f.api.list.mockResolvedValueOnce({ items: [row], nextCursor: 'next' });
+    await act(async () => { f.result.current.enter(); });
+    f.api.list.mockRejectedValueOnce(new ApplicationFailure('http', 503));
+    await act(async () => { f.result.current.loadMore(); });
+    expect(f.result.current.items).toEqual([row]); expect(f.result.current.nextCursor).toBe('next'); expect(f.result.current.loadMoreError).toBe(true);
+  });
+  it('quarantines a rejected pagination read and offers first-page recovery rather than an unavailable cursor', async () => {
+    const f = await fixture(); f.api.list.mockResolvedValueOnce({ items: [row], nextCursor: 'next' });
+    await act(async () => { f.result.current.enter(); });
+    f.api.list.mockRejectedValueOnce(new ApplicationFailure('http', 403));
+    await act(async () => { f.result.current.loadMore(); });
+    expect(f.result.current.items).toEqual([]); expect(f.result.current.nextCursor).toBeNull();
+    expect(f.result.current.listError).toBe(true); expect(f.result.current.loadMoreError).toBe(false);
+  });
+});
+
 describe('workspace integration with route receipts and private coordinator', () => {
   it('keeps rejection terminal for automatic reads when a broadcast cancels the request first', async () => {
     const auth = authFixture({ authenticated: true }); fixtures.push(auth); await auth.store.bootstrap();

@@ -7,6 +7,9 @@ function controller(overrides: Partial<ApplicationsController> = {}): Applicatio
   return { draft: { company: '', jobTitle: '', status: 'SAVED', applicationDate: '', location: '', jobUrl: '', notes: '' },
     setDraft: vi.fn(), items: [], nextCursor: null, loading: false, saving: false, listError: false, failure: null,
     view: 'active', switchView: vi.fn(), removeItem: vi.fn(),
+    filterDraft: { q: '', status: '' }, appliedFilters: {}, filterError: false, hasFilters: false, filtersChanged: false,
+    setFilterDraft: vi.fn(), applyFilters: vi.fn(), clearFilters: vi.fn(), focusTarget: null, acknowledgeFilterFocus: vi.fn(),
+    loadingMore: false, hasLoaded: true, loadMoreError: false,
     message: null, enter: vi.fn(), save: vi.fn(), cooldown: 0, refresh: vi.fn(), loadMore: vi.fn(), replaceItem: vi.fn(), ...overrides };
 }
 describe('application list presentation', () => {
@@ -30,5 +33,18 @@ describe('application list presentation', () => {
     const link = screen.getByRole('link'); expect(link.getAttribute('rel')).toBe('noopener noreferrer'); expect(link.getAttribute('target')).toBe('_blank');
     fireEvent.click(screen.getByRole('button', { name: 'Load more applications' })); expect(state.loadMore).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole('button', { name: /Edit application:/ })); expect(edit).toHaveBeenCalledWith(state.items[0]!.id);
+  });
+  it('does not move editor focus when an explicit search read finishes', () => {
+    const state = controller({ loading: true, focusTarget: 'application-search-q' });
+    const tree = (loading: boolean) => <><button id="editor-control">Editor control</button><ApplicationList controller={{ ...state, loading }} onEdit={vi.fn()} /></>;
+    const view = render(tree(true)); const editor = screen.getByRole('button', { name: 'Editor control' }); editor.focus();
+    view.rerender(tree(false));
+    expect(document.activeElement).toBe(editor); expect(state.acknowledgeFilterFocus).toHaveBeenCalledOnce();
+  });
+  it('distinguishes load-more errors without reporting an empty result or a total count', () => {
+    render(<ApplicationList controller={controller({ listError: true, loadMoreError: true, nextCursor: 'next' })} onEdit={vi.fn()} />);
+    expect(screen.getByRole('alert').textContent).toContain('More applications could not be loaded');
+    expect(screen.queryByText(/No applications saved yet/)).toBeNull(); expect(screen.queryByText(/Showing/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Load more applications' })).toBeTruthy();
   });
 });

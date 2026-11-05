@@ -21,7 +21,7 @@ const empty = (): EditorState => ({ selectedId: null, application: null, draft: 
 
 // Lives above AuthRoute's temporary unmounts. Drafts stay in memory only and are
 // never persisted to browser storage or transferred to another account.
-export function useApplicationEditor(store: AuthStore, api: ApplicationsApi, onSaved: (row: Application, lifecycle?: 'archive' | 'restore') => void, onDeleted?: (id: string) => void) {
+export function useApplicationEditor(store: AuthStore, api: ApplicationsApi, onSaved: (row: Application, lifecycle?: 'archive' | 'restore', previous?: Application) => void, onDeleted?: (id: string) => void) {
   const [state, setState] = useState(empty);
   const navigation = useContext(WorkspaceNavigationContext);
   const lifetime = useRef({ active: false, userId: null as string | null, selectedId: null as string | null,
@@ -137,7 +137,8 @@ export function useApplicationEditor(store: AuthStore, api: ApplicationsApi, onS
       if (!current()) return;
       if (!admitted()) throw new ApplicationFailure('unknown');
       statusChanged = previous.status !== application.status;
-      onSaved(application);
+      if (previous.company !== application.company || previous.jobTitle !== application.jobTitle || statusChanged) onSaved(application, undefined, previous);
+      else onSaved(application);
       setState(value => ({ ...value, application, draft: draftOf(application), recovery: null,
         notice: application.version === previous.version ? 'No changes needed. Your application is up to date.' : 'Changes saved.',
         focusTarget: 'application-edit-feedback', ...(statusChanged ? { history: [], historyCursor: null } : {}) }));

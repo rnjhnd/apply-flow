@@ -13,6 +13,35 @@ const dto = {
 };
 const edit = { ...input, status: 'SAVED', applicationDate: null, location: null, jobUrl: null, notes: null, expectedVersion: 1 };
 
+describe('application search/filter query contracts', () => {
+  it.each(['', ' ', '\t\r\n', '\u2003\u00a0'])('treats blank search %j as absent', q => {
+    expect(listApplicationsQuerySchema.parse({ q }).q).toBeUndefined();
+  });
+  it('trims only outer whitespace without changing case, punctuation or combining characters', () => {
+    const q = 'Zo\u00eb  e\u0301 %_\\\'"';
+    expect(listApplicationsQuerySchema.parse({ q: ` \t${q}\n ` }).q).toBe(q);
+  });
+  it.each(['x', '\ud83d\ude00'])('counts normalized search length in Unicode code points %#', character => {
+    expect(listApplicationsQuerySchema.parse({ q: ` ${character.repeat(200)} ` }).q).toBe(character.repeat(200));
+    expect(listApplicationsQuerySchema.safeParse({ q: character.repeat(201) }).success).toBe(false);
+  });
+  it.each(['\ud800', '\udc00', 'valid\ud800text', '\u0000', ' \u0000 ', null, 1, true, [], ['Acme'], ['A', 'B'], { contains: 'Acme' }])(
+    'rejects prohibited search input %#', q => {
+      expect(listApplicationsQuerySchema.safeParse({ q }).success).toBe(false);
+    });
+  it.each(applicationStatusSchema.options)('accepts exact single status %s with all other list criteria', status => {
+    expect(listApplicationsQuerySchema.parse({ q: ' Acme ', status, view: 'archived', limit: '1', cursor: 'abc' }))
+      .toEqual({ q: 'Acme', status, view: 'archived', limit: 1, cursor: 'abc' });
+  });
+  it.each(['', 'ALL', 'saved', ' SAVED ', 'SAVED,APPLIED', null, 1, [], ['SAVED'], ['SAVED', 'APPLIED'], { equals: 'SAVED' }])(
+    'rejects invalid or multiple status input %#', status => {
+      expect(listApplicationsQuerySchema.safeParse({ status }).success).toBe(false);
+    });
+  it.each(['userId', 'ownerId', 'search', 'statuses', 'orderBy'])('rejects unapproved query key %s', key => {
+    expect(listApplicationsQuerySchema.safeParse({ q: 'Acme', status: 'SAVED', [key]: 'injected' }).success).toBe(false);
+  });
+});
+
 describe('archive lifecycle contracts', () => {
   it.each([1, 2_147_483_647])('accepts bounded numeric revision %i and explicit deletion intent', expectedVersion => {
     expect(applicationLifecycleRequestSchema.parse({ expectedVersion })).toEqual({ expectedVersion });

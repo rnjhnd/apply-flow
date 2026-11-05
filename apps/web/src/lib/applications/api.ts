@@ -149,6 +149,8 @@ export function createApplicationsApi(store: AuthStore, fetcher: typeof fetch = 
       const query = new URLSearchParams({ limit: String(parsed.data.limit) });
       if (parsed.data.view === 'archived') query.set('view', 'archived');
       if (parsed.data.cursor) query.set('cursor', parsed.data.cursor);
+      if (parsed.data.q) query.set('q', parsed.data.q);
+      if (parsed.data.status) query.set('status', parsed.data.status);
       try {
         // The same lock covers authoritative session verification and the GET.
         // Missed broadcasts cannot let another tab's cookie change select a
