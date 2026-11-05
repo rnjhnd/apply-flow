@@ -91,8 +91,13 @@ the application workspace. Search matches a case-insensitive substring and can b
 combined with a status in either Active or Archived, with independent filters for
 each view. Search/Enter applies draft criteria; Clear filters restores the
 unfiltered view. Filters are not persisted across reloads or synchronized to URLs.
-The overview, Kanban board, recent activities and basic analytics remain MVP work;
-the current application list does not constitute the completed dashboard.
+
+The Kanban presentation is implemented for Active applications: seven status
+columns with independent Load more, shared List/Board search and status filters,
+and access to the existing editor and status history. Archived remains List-only.
+Status changes use the editor; drag-and-drop is deferred. The overview, recent
+activities and basic analytics remain MVP work; List and Kanban do not constitute
+the completed dashboard.
 
 ### 5. Activity History
 
@@ -104,7 +109,7 @@ the current application list does not constitute the completed dashboard.
 - Record important application events beyond status transitions: retained as an
   MVP requirement, with broader activity-history scope pending clarification.
 
-## Delivery Status Through Stage 3E.4
+## Delivery Status Through Stage 3F.4
 
 | Area | Status |
 | --- | --- |
@@ -112,13 +117,15 @@ the current application list does not constitute the completed dashboard.
 | Application management | Implemented: creation, listing with Load more, details, editing, archive/restore, confirmed permanent deletion and version-conflict handling for the supported fields above. Employment type and salary remain MVP work. |
 | Status history | Implemented: actual status transitions and per-application history with older-entry loading. General activity history is not complete. |
 | Search and filtering | Implemented: server-side company/title substring search, one optional status, combined filters and independent Active/Archived criteria with pagination. |
-| Dashboard | Overview, Kanban, recent activities and basic analytics remain MVP work. |
+| Kanban | Implemented: Active-only seven-column presentation, per-column pagination, shared Active filters and existing editor integration. Drag-and-drop is deferred. |
+| Dashboard | Overview, recent activities and basic analytics remain MVP work. |
 
 Detailed evidence is recorded in the [Stage 3B.2 acceptance report](docs/milestones/checkpoint-3b2-acceptance-report.md),
 [Stage 3C.3 offline report](docs/milestones/checkpoint-3c3-offline-report.md),
 [Stage 3C.4 manual browser acceptance report](docs/milestones/checkpoint-3c4-manual-browser-acceptance-report.md),
-[Stage 3D.4 lifecycle acceptance report](docs/milestones/checkpoint-3d4-manual-browser-acceptance-report.md) and
-[Stage 3E.4 search/filter acceptance report](docs/milestones/checkpoint-3e4-manual-browser-acceptance-report.md).
+[Stage 3D.4 lifecycle acceptance report](docs/milestones/checkpoint-3d4-manual-browser-acceptance-report.md),
+[Stage 3E.4 search/filter acceptance report](docs/milestones/checkpoint-3e4-manual-browser-acceptance-report.md) and
+[Stage 3F Kanban acceptance report](docs/milestones/checkpoint-3f3-manual-browser-acceptance-report.md).
 Full Review saved application conflict recovery and history pagination beyond 20
 entries remain manually unverified, without observed blocking defects. The
 documented unknown-history-entry navigation fallback limitation remains.

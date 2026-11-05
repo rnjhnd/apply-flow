@@ -7,6 +7,8 @@ function controller(overrides: Partial<ApplicationsController> = {}): Applicatio
   return { draft: { company: '', jobTitle: '', status: 'SAVED', applicationDate: '', location: '', jobUrl: '', notes: '' },
     setDraft: vi.fn(), items: [], nextCursor: null, loading: false, saving: false, listError: false, failure: null,
     view: 'active', switchView: vi.fn(), removeItem: vi.fn(),
+    activeFilters: { draft: { q: '', status: '' }, applied: {}, error: false }, setCollectionEnabled: vi.fn().mockResolvedValue(undefined), settleCollectionRead: vi.fn().mockResolvedValue(undefined),
+    hasPendingCollectionRead: vi.fn().mockReturnValue(false),
     filterDraft: { q: '', status: '' }, appliedFilters: {}, filterError: false, hasFilters: false, filtersChanged: false,
     setFilterDraft: vi.fn(), applyFilters: vi.fn(), clearFilters: vi.fn(), focusTarget: null, acknowledgeFilterFocus: vi.fn(),
     loadingMore: false, hasLoaded: true, loadMoreError: false,

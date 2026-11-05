@@ -7,18 +7,19 @@ export type ApplicationDraft = { company: string; jobTitle: string; status: stri
   location: string; jobUrl: string; notes: string };
 const emptyDraft: ApplicationDraft = { company: '', jobTitle: '', status: 'SAVED', applicationDate: '', location: '', jobUrl: '', notes: '' };
 export type ApplicationsView = 'active' | 'archived';
-type AppliedFilters = { q?: string; status?: ApplicationStatus };
+export type AppliedApplicationFilters = { q?: string; status?: ApplicationStatus };
 export type ApplicationFilterDraft = { q: string; status: '' | ApplicationStatus };
-const emptyFilters = () => ({ draft: { q: '', status: '' } as ApplicationFilterDraft, applied: {} as AppliedFilters, error: false });
+const emptyFilters = () => ({ draft: { q: '', status: '' } as ApplicationFilterDraft, applied: {} as AppliedApplicationFilters, error: false });
 const emptyViews = () => ({ active: emptyFilters(), archived: emptyFilters() });
 function newLifetime(userId: string | null = null) {
   return { active: true, userId, view: 'active' as ApplicationsView, operation: 0, request: 0,
     saving: false, attempted: false, reading: false, rejectedRead: false, settlingRead: null as number | null,
-    abort: null as AbortController | null, filters: emptyViews(), needsRefresh: false };
+    abort: null as AbortController | null, filters: emptyViews(), needsRefresh: false,
+    collectionEnabled: true, settlement: null as Promise<void> | null };
 }
 
 // The page owns drafts and outcomes above temporarily unmounted protected content.
-export function useApplications(store: AuthStore, api: Pick<ApplicationsApi, 'create' | 'list'>) {
+export function useApplications(store: AuthStore, api: Pick<ApplicationsApi, 'create' | 'list'>, onCreated?: (application: Application) => void) {
   const [draft, setDraft] = useState<ApplicationDraft>({ ...emptyDraft });
   const [view, setView] = useState<ApplicationsView>('active');
   const [items, setItems] = useState<Application[]>([]);
@@ -72,7 +73,7 @@ export function useApplications(store: AuthStore, api: Pick<ApplicationsApi, 'cr
   }
   function load(cursor?: string) {
     const owner = lifetime.current;
-    if (!owner.active || owner.saving || owner.reading || !admitted() || (failure?.retryAt !== null && failure?.retryAt !== undefined && failure.retryAt > Date.now())) return;
+    if (!owner.active || !owner.collectionEnabled || owner.saving || owner.reading || !admitted() || (failure?.retryAt !== null && failure?.retryAt !== undefined && failure.retryAt > Date.now())) return;
     owner.attempted = true; owner.reading = true; owner.rejectedRead = false;
     const ticket = ++owner.request, requestedView = owner.view, requestedUser = owner.userId, applied = owner.filters[requestedView].applied;
     owner.settlingRead = ticket;
@@ -81,7 +82,7 @@ export function useApplications(store: AuthStore, api: Pick<ApplicationsApi, 'cr
     if (!cursor) { setItems([]); setNextCursor(null); setHasLoaded(false); }
     const current = () => owner.active && lifetime.current === owner && ticket === owner.request && owner.view === requestedView
       && owner.userId === requestedUser && owner.filters[requestedView].applied === applied;
-    void api.list({ ...applied, ...(cursor ? { cursor } : {}), ...(requestedView === 'archived' ? { view: requestedView } : {}) }, abort.signal).then(result => {
+    const settlement = api.list({ ...applied, ...(cursor ? { cursor } : {}), ...(requestedView === 'archived' ? { view: requestedView } : {}) }, abort.signal).then(result => {
       if (!current() || !admitted()) return;
       setItems(previous => [...new Map((cursor ? [...previous, ...result.items] : result.items).map(item => [item.id, item])).values()]);
       setNextCursor(result.nextCursor);
@@ -92,9 +93,11 @@ export function useApplications(store: AuthStore, api: Pick<ApplicationsApi, 'cr
       if (error instanceof ApplicationFailure && error.status === 429) setFailure(error);
     } })
       .finally(() => {
+        if (owner.settlement === settlement) owner.settlement = null;
         if (owner.settlingRead === ticket) owner.settlingRead = null;
         if (current()) { owner.reading = false; owner.abort = null; setLoading(false); setLoadingMore(false); }
       });
+    owner.settlement = settlement;
   }
   function enter(allowRead = true) {
     const owner = lifetime.current;
@@ -122,7 +125,7 @@ export function useApplications(store: AuthStore, api: Pick<ApplicationsApi, 'cr
       owner.filters = { ...owner.filters, [owner.view]: { ...owner.filters[owner.view], error: true } };
       setFilters(owner.filters); setFocusTarget('application-search-q'); return;
     }
-    const applied: AppliedFilters = { ...(parsed.data.q ? { q: parsed.data.q } : {}), ...(parsed.data.status ? { status: parsed.data.status } : {}) };
+    const applied: AppliedApplicationFilters = { ...(parsed.data.q ? { q: parsed.data.q } : {}), ...(parsed.data.status ? { status: parsed.data.status } : {}) };
     owner.filters = { ...owner.filters, [owner.view]: { applied, draft: { q: applied.q ?? '', status: applied.status ?? '' }, error: false } };
     setFilters(owner.filters); owner.needsRefresh = false;
     cancelRead(); setMessage(null); setFocusTarget(focus ?? null); load();
@@ -134,12 +137,13 @@ export function useApplications(store: AuthStore, api: Pick<ApplicationsApi, 'cr
     const ticket = ++owner.operation;
     setSaving(true); setFailure(null); setMessage(null);
     const current = () => owner.active && lifetime.current === owner && ticket === owner.operation;
-    void api.create(input).then(() => {
+    void api.create(input).then(({ application }) => {
       if (!current()) return;
       if (!admitted()) { setFailure(new ApplicationFailure('unknown')); return; }
       setDraft({ ...emptyDraft }); setMessage(Object.keys(owner.filters[owner.view].applied).length
         ? 'Application saved. Your filters are still applied; the new application may not appear in these results.' : 'Application saved.');
       owner.saving = false; owner.attempted = true;
+      onCreated?.(application);
       load();
     }).catch(error => {
       if (current()) {
@@ -159,6 +163,19 @@ export function useApplications(store: AuthStore, api: Pick<ApplicationsApi, 'cr
   }
   const currentFilters = filters[view], hasFilters = !!(currentFilters.applied.q || currentFilters.applied.status);
   return { draft, setDraft, view, switchView, items, nextCursor, loading, loadingMore, hasLoaded, saving, listError, loadMoreError, failure, message, enter, save,
+    activeFilters: filters.active,
+    settleCollectionRead: () => lifetime.current.settlement ?? Promise.resolve(),
+    hasPendingCollectionRead: () => lifetime.current.settlement !== null,
+    // Future presentation integration awaits this before admitting Board/editor
+    // reads. Abort alone does not release AuthStore's authenticated request lock.
+    setCollectionEnabled: async (enabled: boolean) => {
+      const owner = lifetime.current;
+      if (owner.collectionEnabled === enabled) { if (!enabled) await owner.settlement; return; }
+      owner.collectionEnabled = enabled;
+      cancelRead(); owner.attempted = false;
+      setItems([]); setNextCursor(null); setHasLoaded(false); setListError(false); setLoadMoreError(false);
+      await owner.settlement;
+    },
     filterDraft: currentFilters.draft, appliedFilters: currentFilters.applied, filterError: currentFilters.error, hasFilters,
     filtersChanged: currentFilters.draft.q !== (currentFilters.applied.q ?? '') || currentFilters.draft.status !== (currentFilters.applied.status ?? ''),
     setFilterDraft, applyFilters: (focus?: string) => applyFilters(false, focus), clearFilters: (focus?: string) => applyFilters(true, focus),
